@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+.ipynb_checkpoints/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Local data store and trained artifacts (anchored to the repo root, so the
+# `cfb/data/` package is NOT excluded).
+/data/
+/artifacts/
+*.parquet
+*.joblib
+*.pem
