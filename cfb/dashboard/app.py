@@ -306,10 +306,11 @@ def page_setup(status, creds, names):
                     "player-PPA data to be worth anything — run the ablation on "
                     "the Backtest page before turning either on.")
                 c5, c6 = st.columns(2)
-                include_roster = c5.checkbox(
-                    "roster-continuity features", value=False,
-                    help="Portal flux, returning production by phase, and QB "
-                         "continuity as ~30 extra model inputs.")
+                roster_features = c5.selectbox(
+                    "roster-continuity features", ["none", "trim", "trim_x", "full"],
+                    help="none: off. trim: three columns (QB continuity, portal "
+                         "net rating, returning offence). trim_x: those plus "
+                         "explicit prior-rating interactions. full: all ~30.")
                 use_roster_prior = c6.checkbox(
                     "roster-aware preseason prior", value=False,
                     help="Shrink early-season ratings toward a fitted prior from "
@@ -322,7 +323,7 @@ def page_setup(status, creds, names):
                     f"Training {model_name}", bootstrap.train_model,
                     model_name=model_name, members=tuple(members or ["ridge"]),
                     include_market=include_market,
-                    include_roster=include_roster,
+                    roster_features=roster_features,
                     use_roster_prior=use_roster_prior,
                     dist_method=dist_method, refit=refit, name=art_name)
                 if out is not None:

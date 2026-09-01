@@ -66,6 +66,21 @@ ROSTER_FEATURE_STEMS = [
 ROSTER_FEATURES = [f"{stem}_{side}" for stem in ROSTER_FEATURE_STEMS
                    for side in ("home", "away", "diff")]
 
+#: A deliberately small subset: the three columns with any plausible signal,
+#: chosen *before* seeing a result rather than picked off a leaderboard.
+#: The full block's problem is thirty columns carrying almost nothing.
+ROSTER_TRIM_FEATURES = [
+    "qb_continuity_diff", "portal_net_rating_diff", "returning_off_diff",
+]
+
+#: Roster facts do not predict who wins; they predict how much of last season
+#: still applies. That is an interaction with the prior rating, and a linear
+#: model cannot form it on its own -- so form it explicitly.
+ROSTER_INTERACTION_FEATURES = [
+    "rat_x_returning_home", "rat_x_returning_away", "rat_x_returning_diff",
+    "rat_x_qb_diff",
+]
+
 MARKET_FEATURES = ["market_margin", "market_total", "market_margin_open", "line_move"]
 
 TARGETS = ["margin", "total", "home_win"]
@@ -78,12 +93,15 @@ class FeatureConfig:
     cap_points: float | None = 52.0
     form_window: int = 3
     include_market: bool = False
-    #: Roster-continuity feature block (portal flux, QB continuity).
-    #: OFF by default: measured across four synthetic seasons-sets it costs
-    #: +0.037 MAE (sd 0.022) -- thirty extra low-signal columns buy variance,
-    #: not accuracy. Turn on and re-measure once you have real data;
-    #: `cfb ablate` runs exactly that comparison.
-    include_roster: bool = False
+    #: Roster-continuity feature block (portal flux, QB continuity):
+    #:   "none" -- off (default)
+    #:   "trim" -- three pre-committed columns
+    #:   "trim_x" -- those plus explicit prior-rating interactions
+    #:   "full" -- all thirty columns
+    #: Defaults to off: the full block measured +0.037 MAE (sd 0.022) across
+    #: four synthetic seed-sets. `cfb ablate` re-runs the comparison on your
+    #: own data.
+    roster_features: str = "none"
     #: Shrink early-season ratings toward a fitted preseason prior instead of
     #: toward the league mean (cfb.features.preseason). Improves the ratings
     #: themselves by ~0.11 MAE but is neutral downstream (+0.010, sd 0.013),
@@ -192,7 +210,8 @@ def build_features(
 
     # ---- roster table, needed by both the prior and the feature block ----
     roster = (build_roster_features(portal, player_ppa, returning)
-              if (cfg.include_roster or cfg.use_roster_prior) else pd.DataFrame())
+              if (cfg.roster_features != "none" or cfg.use_roster_prior)
+              else pd.DataFrame())
 
     # ---- walk-forward ratings, refit once per (season, week) ----
     rat_rows: list[dict] = []
@@ -270,7 +289,7 @@ def build_features(
             feats[h] = feats[a] = feats[f"{stem}_diff"] = np.nan
 
     # ---- roster continuity (portal era) ----
-    if cfg.include_roster:
+    if cfg.roster_features != "none":
         for stem in ROSTER_FEATURE_STEMS:
             if stem in roster.columns:
                 feats = _join_team_season(feats, roster, stem, stem)
@@ -279,6 +298,18 @@ def build_features(
                 feats[f"{stem}_away"] = np.nan
             h, a = f"{stem}_home", f"{stem}_away"
             feats[f"{stem}_diff"] = feats[h] - feats[a]
+
+        if cfg.roster_features == "trim_x":
+            # Continuity scales how much of the prior rating survives, so give
+            # the model the product rather than hoping it infers one.
+            for side in ("home", "away"):
+                feats[f"rat_x_returning_{side}"] = (
+                    feats[f"rat_net_{side}"] * feats[f"returning_off_{side}"])
+            feats["rat_x_returning_diff"] = (feats["rat_x_returning_home"]
+                                             - feats["rat_x_returning_away"])
+            feats["rat_x_qb_diff"] = (
+                feats["rat_net_home"] * feats["qb_continuity_home"]
+                - feats["rat_net_away"] * feats["qb_continuity_away"])
 
     # ---- market ----
     cons = consensus_lines(lines)
@@ -300,8 +331,15 @@ def build_features(
 def feature_columns(cfg: FeatureConfig | None = None) -> list[str]:
     cfg = cfg or FeatureConfig()
     cols = RATING_FEATURES + ELO_FEATURES + CONTEXT_FEATURES + FORM_FEATURES + PRIOR_FEATURES
-    if cfg.include_roster:
+    if cfg.roster_features == "full":
         cols = cols + ROSTER_FEATURES
+    elif cfg.roster_features == "trim":
+        cols = cols + ROSTER_TRIM_FEATURES
+    elif cfg.roster_features == "trim_x":
+        cols = cols + ROSTER_TRIM_FEATURES + ROSTER_INTERACTION_FEATURES
+    elif cfg.roster_features != "none":
+        raise ValueError(
+            f"roster_features must be none/trim/trim_x/full, got {cfg.roster_features!r}")
     if cfg.include_market:
         cols = cols + MARKET_FEATURES
     return cols

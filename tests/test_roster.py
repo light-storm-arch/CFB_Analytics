@@ -148,18 +148,60 @@ def test_feature_config_defaults_keep_the_roster_work_off():
     from cfb.features.build import FeatureConfig, feature_columns
 
     cfg = FeatureConfig()
-    assert cfg.include_roster is False
+    assert cfg.roster_features == "none"
     assert cfg.use_roster_prior is False
     assert not any(c.startswith("qb_") for c in feature_columns(cfg))
-    on = feature_columns(FeatureConfig(include_roster=True))
-    assert "qb_continuity_diff" in on and "portal_net_rating_diff" in on
+
+
+@pytest.mark.parametrize("mode,expected_extra", [
+    ("none", 0), ("trim", 3), ("trim_x", 7), ("full", 30),
+])
+def test_roster_modes_select_the_right_columns(mode, expected_extra):
+    from cfb.features.build import FeatureConfig, feature_columns
+
+    base = len(feature_columns(FeatureConfig(roster_features="none")))
+    assert len(feature_columns(FeatureConfig(roster_features=mode))) == base + expected_extra
+
+
+def test_trim_is_a_subset_of_full():
+    from cfb.features.build import (
+        ROSTER_FEATURES, ROSTER_TRIM_FEATURES, FeatureConfig, feature_columns,
+    )
+
+    assert set(ROSTER_TRIM_FEATURES) < set(ROSTER_FEATURES)
+    trim = set(feature_columns(FeatureConfig(roster_features="trim")))
+    full = set(feature_columns(FeatureConfig(roster_features="full")))
+    assert trim < full
+
+
+def test_unknown_roster_mode_is_rejected():
+    from cfb.features.build import FeatureConfig, feature_columns
+
+    with pytest.raises(ValueError, match="roster_features"):
+        feature_columns(FeatureConfig(roster_features="everything"))
+
+
+def test_interaction_columns_are_actually_products(universe):
+    """trim_x must form prior-rating x continuity, not just copy columns."""
+    from cfb.features.build import FeatureConfig, build_features
+
+    cfg = FeatureConfig(roster_features="trim_x")
+    feats = build_features(
+        universe["games"], lines=universe["lines"], talent=universe["talent"],
+        returning=universe["returning"], sp_ratings=universe["sp_ratings"],
+        portal=universe["portal"], player_ppa=universe["player_ppa"], cfg=cfg)
+    row = feats.dropna(subset=["rat_net_home", "returning_off_home"]).iloc[0]
+    assert row["rat_x_returning_home"] == pytest.approx(
+        row["rat_net_home"] * row["returning_off_home"])
+    assert row["rat_x_returning_diff"] == pytest.approx(
+        row["rat_x_returning_home"] - row["rat_x_returning_away"])
 
 
 def test_roster_features_are_leak_free_end_to_end(universe):
     """The full feature build must not let a game see its own result."""
     from cfb.features.build import FeatureConfig, build_features, feature_columns
 
-    cfg = FeatureConfig(include_roster=True, use_roster_prior=True)
+    cfg = FeatureConfig(roster_features="full", use_roster_prior=True)
     kw = dict(lines=universe["lines"], talent=universe["talent"],
               returning=universe["returning"], sp_ratings=universe["sp_ratings"],
               portal=universe["portal"], player_ppa=universe["player_ppa"], cfg=cfg)
