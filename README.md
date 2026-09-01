@@ -118,6 +118,8 @@ Step-by-step for both, including rate limits and what each endpoint gives you:
 | `cfb train --model ensemble` | Walk-forward train the model + distribution layer, save it |
 | `cfb backtest --models ridge,forest,xgboost,ensemble` | Compare models honestly |
 | `cfb calibration` | CRPS, log loss, PIT, interval coverage, exact-margin accuracy |
+| `cfb probe` | Check which CollegeFootballData endpoints your key can reach |
+| `cfb ablate` | Does the transfer-portal work help your data? Four-way walk-forward |
 | `cfb predict --week 12` | Price a slate |
 | `cfb game --home X --away Y` | One matchup, full distribution and buckets |
 | `cfb live` | Live win probabilities from the ESPN scoreboard |
@@ -178,6 +180,23 @@ available here:
 - Everything the models emit is in home-margin space. Conversion to a specific
   team's perspective happens only at the presentation and betting layers.
 
+## The transfer portal
+
+Roster-continuity features (portal flux, returning production by phase, QB
+continuity) and a roster-aware preseason ratings prior are both built, tested
+and leak-free — and both **default to off**, because on the bundled synthetic
+league the feature block measured *worse* (+0.037 MAE, sd 0.022 over four
+seeds) and the prior measured neutral (+0.010, sd 0.013).
+
+The prior does improve the ratings themselves (18% better at predicting next
+season than reusing last season's number), but the downstream model reaches the
+same information by other routes. And even with *perfect* roster knowledge the
+ceiling over plain shrinkage was 2.2%.
+
+That verdict is from synthetic data whose roster effects are an invention, so it
+cannot be the final word. Once you have real portal data, `cfb ablate` runs the
+exact four-way comparison. Details and numbers: [docs/MODELING.md](docs/MODELING.md) §8b.
+
 ## Reading the results honestly
 
 `cfb backtest` reports out-of-sample results only — the walk-forward refits the
@@ -206,7 +225,7 @@ A few things worth internalising before you bet:
 ## Testing
 
 ```bash
-pytest -q       # 95 tests, ~60s, all on synthetic data
+pytest -q       # 111 tests, ~35s, all on synthetic data
 ```
 
 CI runs them on every push against Python 3.11 and 3.12.

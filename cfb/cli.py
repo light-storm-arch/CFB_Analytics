@@ -136,6 +136,63 @@ def synth(teams, seasons, start, pbp, seed):
     click.echo("meaningless as a prediction about real teams.")
 
 
+@main.command()
+@click.option("--year", type=int, default=None, help="Season to probe (default: last year).")
+def probe(year):
+    """Check which CollegeFootballData endpoints actually return data.
+
+    The player and portal endpoints could not be exercised against the live API
+    while this was written, so run this once after your key works. It reports
+    row counts and columns per endpoint, and names anything that failed, so a
+    renamed or moved endpoint is obvious rather than showing up later as a
+    column of NaNs.
+    """
+    import datetime as dt
+
+    from cfb.data.cfbd_client import CFBDClient
+
+    year = year or (dt.date.today().year - 1)
+    try:
+        client = CFBDClient()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    checks = [
+        ("games", lambda: client.games(year)),
+        ("lines", lambda: client.lines(year)),
+        ("sp_ratings", lambda: client.sp_ratings(year)),
+        ("talent", lambda: client.talent(year)),
+        ("returning", lambda: client.returning_production(year)),
+        ("advanced_season", lambda: client.advanced_season_stats(year)),
+        ("team_games", lambda: client.team_game_stats(year)),
+        ("portal", lambda: client.transfer_portal(year)),
+        ("player_ppa", lambda: client.player_season_ppa(year)),
+        ("player_usage", lambda: client.player_usage(year)),
+        ("roster", lambda: client.roster(year)),
+        ("recruits", lambda: client.recruits(year)),
+    ]
+    click.echo(f"probing CollegeFootballData for {year}\n")
+    rows = []
+    for name, fn in checks:
+        try:
+            df = fn()
+            rows.append({"endpoint": name, "status": "ok" if len(df) else "EMPTY",
+                         "rows": len(df),
+                         "columns": ", ".join(list(df.columns)[:6])})
+        except Exception as exc:  # noqa: BLE001 - reporting is the whole point
+            rows.append({"endpoint": name, "status": "FAILED", "rows": 0,
+                         "columns": str(exc)[:90]})
+    _echo_df(pd.DataFrame(rows))
+    bad = [r["endpoint"] for r in rows if r["status"] != "ok"]
+    if bad:
+        click.echo(f"\nNot returning data: {', '.join(bad)}")
+        click.echo("Roster-aware features degrade gracefully when a source is "
+                   "missing — they are dropped, not faked. But if `portal` or "
+                   "`player_ppa` is failing, the portal-era work is inert.")
+    else:
+        click.echo("\nAll endpoints returned data.")
+
+
 # ---------------------------------------------------------------- train --
 @main.command()
 @click.option("--model", "model_name", default="ensemble",
@@ -205,6 +262,64 @@ def backtest(models, market, refit, thresholds):
             _echo_df(ats_by_threshold(pred).round(4))
             click.echo("\nBreak-even at -110 is 0.5238. Treat anything under ~2,000 "
                        "bets as noise.")
+
+
+@main.command()
+@click.option("--models", default="ridge", help="Models to test (comma separated).")
+@click.option("--seeds", default=1, help="Synthetic seeds to average over (synthetic data only).")
+def ablate(models, seeds):
+    """Measure whether the roster-era options actually help *your* data.
+
+    Runs the same walk-forward four ways -- baseline, roster features only,
+    roster prior only, and both -- and reports the difference. On the bundled
+    synthetic league both options come out neutral-to-worse, which is why they
+    ship off; real data may say otherwise, and this is how you find out.
+    """
+    from cfb.data.store import Store
+    from cfb.evaluation.backtest import walk_forward_predictions
+    from cfb.features.build import FeatureConfig, build_features, feature_columns
+
+    store = Store()
+    games = store.read("games")
+    if games.empty:
+        raise click.ClickException("no games in the store; run `cfb fetch` or `cfb synth`")
+    kw = dict(lines=store.read("lines"), talent=store.read("talent"),
+              returning=store.read("returning"), sp_ratings=store.read("sp_ratings"),
+              portal=store.read("portal"), player_ppa=store.read("player_ppa"))
+    if kw["portal"].empty and kw["player_ppa"].empty:
+        click.echo("No portal or player-PPA data in the store. Fetch it first "
+                   "(`cfb fetch`), or the roster options have nothing to work with.\n")
+
+    variants = {
+        "baseline": FeatureConfig(include_roster=False, use_roster_prior=False),
+        "roster features": FeatureConfig(include_roster=True, use_roster_prior=False),
+        "roster prior": FeatureConfig(include_roster=False, use_roster_prior=True),
+        "both": FeatureConfig(include_roster=True, use_roster_prior=True),
+    }
+    rows = []
+    for model in [m.strip() for m in models.split(",") if m.strip()]:
+        for label, cfg in variants.items():
+            feats = build_features(games, cfg=cfg, **kw)
+            oos = walk_forward_predictions(feats, feature_columns(cfg),
+                                           model_name=model, progress=False)
+            if oos.empty:
+                continue
+            err = (oos["pred_margin"] - oos["margin"]).abs()
+            rows.append({
+                "model": model, "variant": label, "games": len(oos),
+                "wk1_4_mae": float(err[oos["week"] <= 4].mean()),
+                "wk5plus_mae": float(err[oos["week"] >= 5].mean()),
+                "mae": float(err.mean()),
+            })
+    table = pd.DataFrame(rows)
+    if table.empty:
+        raise click.ClickException("walk-forward produced nothing; need more history")
+    base = table[table.variant == "baseline"].set_index("model")["mae"]
+    table["vs_baseline"] = [r.mae - base.get(r.model, np.nan) for r in table.itertuples()]
+    _echo_df(table.round(4))
+    click.echo("\nNegative `vs_baseline` means the option helped. Differences under "
+               "about 0.05 MAE on a few thousand games are noise -- run with more "
+               "seasons before trusting a small gap.")
 
 
 @main.command("calibration")

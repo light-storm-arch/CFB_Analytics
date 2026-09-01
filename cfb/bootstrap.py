@@ -194,6 +194,8 @@ def train_model(
     model_name: str = "ridge",
     members: tuple[str, ...] = ("ridge", "xgboost", "forest"),
     include_market: bool = False,
+    include_roster: bool = False,
+    use_roster_prior: bool = False,
     dist_method: str = "lattice",
     refit: str = "season",
     name: str = "default",
@@ -203,7 +205,9 @@ def train_model(
 ) -> tuple[Predictor, pd.DataFrame]:
     """Build features, walk-forward train, fit the distribution layer, save."""
     progress = progress or _noop
-    fcfg = FeatureConfig(include_market=include_market)
+    fcfg = FeatureConfig(include_market=include_market,
+                         include_roster=include_roster,
+                         use_roster_prior=use_roster_prior)
     progress(0.05, "building features (walk-forward ratings) ...")
     feats = load_features(cfg=fcfg)
     n_completed = int(feats["margin"].notna().sum())
@@ -229,6 +233,57 @@ def train_model(
             log.warning("could not save predictor: %s", exc)
     progress(1.0, "model ready")
     return predictor, oos
+
+
+def roster_ablation(models: tuple[str, ...] = ("ridge",),
+                    progress: Progress | None = None) -> pd.DataFrame:
+    """Does the portal-era work help *this* data? Four-way walk-forward.
+
+    Compares baseline against the roster feature block, the roster-aware prior,
+    and both.  On the bundled synthetic league both come out neutral-to-worse,
+    which is why they ship off; this is how you check whether real data says
+    something different.
+    """
+    from cfb.data.store import Store
+    from cfb.evaluation.backtest import walk_forward_predictions
+    from cfb.features.build import build_features, feature_columns
+
+    progress = progress or _noop
+    store = Store()
+    games = store.read("games")
+    if games.empty:
+        raise RuntimeError("no games in the store")
+    kw = dict(lines=store.read("lines"), talent=store.read("talent"),
+              returning=store.read("returning"), sp_ratings=store.read("sp_ratings"),
+              portal=store.read("portal"), player_ppa=store.read("player_ppa"))
+    variants = {
+        "baseline": FeatureConfig(include_roster=False, use_roster_prior=False),
+        "roster features": FeatureConfig(include_roster=True, use_roster_prior=False),
+        "roster prior": FeatureConfig(include_roster=False, use_roster_prior=True),
+        "both": FeatureConfig(include_roster=True, use_roster_prior=True),
+    }
+    rows, step, total = [], 0, len(models) * len(variants)
+    for model in models:
+        for label, cfg in variants.items():
+            step += 1
+            progress(step / total, f"{model} / {label} ...")
+            feats = build_features(games, cfg=cfg, **kw)
+            oos = walk_forward_predictions(feats, feature_columns(cfg),
+                                           model_name=model, progress=False)
+            if oos.empty:
+                continue
+            err = (oos["pred_margin"] - oos["margin"]).abs()
+            rows.append({"model": model, "variant": label, "games": len(oos),
+                         "wk1_4_mae": float(err[oos["week"] <= 4].mean()),
+                         "wk5plus_mae": float(err[oos["week"] >= 5].mean()),
+                         "mae": float(err.mean())})
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        base = out[out.variant == "baseline"].set_index("model")["mae"]
+        out["vs_baseline"] = [r.mae - base.get(r.model, float("nan"))
+                              for r in out.itertuples()]
+    progress(1.0, "done")
+    return out
 
 
 def load_predictor(name: str = "default") -> Predictor | None:

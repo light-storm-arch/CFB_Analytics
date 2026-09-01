@@ -236,6 +236,121 @@ class CFBDClient:
         return pd.DataFrame(self._get("/calendar", year=year))
 
     # ------------------------------------------------------------------ #
+    # Player / roster data (the portal-era layer)
+    # ------------------------------------------------------------------ #
+    # NOTE: these endpoints were written against CFBD's documented shapes but
+    # could not be exercised against the live API from the environment this was
+    # built in.  Every one is defensive about missing or renamed fields, and
+    # `cfb probe` reports which actually return data for your key.  If one has
+    # moved, fix it here rather than downstream -- the feature code only ever
+    # sees the normalised frames below.
+    def transfer_portal(self, year: int) -> pd.DataFrame:
+        """Transfer portal entries for an offseason (``/player/portal``).
+
+        CFBD does not reliably expose a player id here, so one is synthesised
+        from the name when absent.  Quarterback continuity is therefore derived
+        from ``player_season_ppa`` (which does carry ids) rather than from this
+        table; this table is used for aggregate talent flux only.
+        """
+        raw = self._get("/player/portal", year=year)
+        rows = []
+        for r in raw:
+            first = _first(r, "first_name", default="") or ""
+            last = _first(r, "last_name", default="") or ""
+            name = (f"{first} {last}").strip() or str(_first(r, "name", default=""))
+            pid = _first(r, "id", "player_id")
+            rows.append({
+                "season": int(_first(r, "season", default=year)),
+                "player_id": str(pid) if pid is not None else f"name:{name.lower()}",
+                "name": name,
+                "position": _first(r, "position"),
+                "origin": _first(r, "origin"),
+                "destination": _first(r, "destination"),
+                "rating": _num(_first(r, "rating")),
+                "stars": _int(_first(r, "stars")),
+                "eligibility": _first(r, "eligibility"),
+            })
+        return pd.DataFrame(rows)
+
+    def player_season_ppa(self, year: int, exclude_garbage_time: bool = True
+                          ) -> pd.DataFrame:
+        """Per-player season PPA (``/ppa/players/season``).
+
+        This is the backbone of the quarterback features: it carries a stable
+        player id, so "did this team's starter come back, arrive from another
+        school, or is he new?" is answerable by comparing ids across seasons --
+        no name matching, which would be fragile on real data.
+        """
+        raw = self._get("/ppa/players/season", year=year,
+                        excludeGarbageTime=str(bool(exclude_garbage_time)).lower())
+        rows = []
+        for r in raw:
+            avg = r.get("average_ppa") or {}
+            tot = r.get("total_ppa") or {}
+            pid = _first(r, "id", "player_id")
+            rows.append({
+                "season": int(_first(r, "season", default=year)),
+                "player_id": str(pid) if pid is not None else None,
+                "name": _first(r, "name"),
+                "position": _first(r, "position"),
+                "team": _first(r, "team"),
+                "conference": _first(r, "conference"),
+                "plays": _int(_first(r, "countable_plays", "plays"), 0),
+                "avg_ppa_all": _num(avg.get("all") if isinstance(avg, dict) else avg),
+                "total_ppa_all": _num(tot.get("all") if isinstance(tot, dict) else tot),
+            })
+        df = pd.DataFrame(rows)
+        return df.dropna(subset=["player_id"]) if not df.empty else df
+
+    def player_usage(self, year: int) -> pd.DataFrame:
+        """Per-player usage share (``/player/usage``)."""
+        raw = self._get("/player/usage", year=year)
+        rows = []
+        for r in raw:
+            usage = r.get("usage") or {}
+            pid = _first(r, "id", "player_id")
+            rows.append({
+                "season": int(_first(r, "season", default=year)),
+                "player_id": str(pid) if pid is not None else None,
+                "name": _first(r, "name"), "position": _first(r, "position"),
+                "team": _first(r, "team"),
+                "usage_overall": _num(usage.get("overall") if isinstance(usage, dict) else usage),
+            })
+        return pd.DataFrame(rows)
+
+    def roster(self, year: int, team: str | None = None) -> pd.DataFrame:
+        """Team rosters (``/roster``)."""
+        raw = self._get("/roster", year=year, team=team)
+        rows = []
+        for r in raw:
+            pid = _first(r, "id", "player_id")
+            rows.append({
+                "season": int(_first(r, "year", "season", default=year)),
+                "player_id": str(pid) if pid is not None else None,
+                "name": " ".join(x for x in (_first(r, "first_name", default=""),
+                                             _first(r, "last_name", default="")) if x),
+                "position": _first(r, "position"),
+                "team": _first(r, "team"),
+            })
+        return pd.DataFrame(rows)
+
+    def recruits(self, year: int) -> pd.DataFrame:
+        """Individual recruit ratings (``/recruiting/players``)."""
+        raw = self._get("/recruiting/players", year=year)
+        rows = []
+        for r in raw:
+            rows.append({
+                "season": int(_first(r, "year", "season", default=year)),
+                "name": _first(r, "name"),
+                "position": _first(r, "position"),
+                "team": _first(r, "committed_to"),
+                "rating": _num(_first(r, "rating")),
+                "stars": _int(_first(r, "stars")),
+                "ranking": _int(_first(r, "ranking")),
+            })
+        return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------ #
     # Play-by-play (heavy: one call per week)
     # ------------------------------------------------------------------ #
     def plays(self, year: int, week: int, season_type: str = "regular") -> pd.DataFrame:
@@ -270,18 +385,24 @@ class CFBDClient:
         return pd.DataFrame(rows)
 
     def plays_season(self, year: int, weeks: Iterable[int] | None = None,
-                     season_type: str = "regular") -> pd.DataFrame:
-        weeks = list(weeks) if weeks is not None else range(1, 16)
-        frames = []
-        for w in weeks:
+                     season_type: str = "regular",
+                     max_workers: int = 4) -> pd.DataFrame:
+        """All plays for a season. One request per week, run concurrently."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        weeks = list(weeks) if weeks is not None else list(range(1, 16))
+
+        def _one(w: int) -> pd.DataFrame:
             try:
-                df = self.plays(year, w, season_type)
-            except Exception as exc:  # noqa: BLE001 - one bad week shouldn't kill the pull
+                return self.plays(year, w, season_type)
+            except Exception as exc:  # noqa: BLE001 - one bad week must not kill the pull
                 log.warning("plays %s wk%s failed: %s", year, w, exc)
-                continue
-            if not df.empty:
-                frames.append(df)
-                log.info("plays %s wk%-2d rows=%d", year, w, len(df))
+                return pd.DataFrame()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            frames = [f for f in pool.map(_one, weeks) if not f.empty]
+        for w, f in zip(weeks, frames):
+            log.debug("plays %s wk%-2d rows=%d", year, w, len(f))
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -336,46 +457,68 @@ def fetch_seasons(
     include_plays: bool = False,
     play_weeks: Iterable[int] | None = None,
     progress: Callable[[float, str], None] | None = None,
+    max_workers: int = 4,
 ) -> dict[str, int]:
     """Pull every season-level table for ``years`` and upsert into the store.
+
+    Requests run concurrently because the wall-clock cost here is network
+    latency, not our own work.  The client's throttle is global and lock-guarded,
+    so concurrency overlaps waiting without increasing the rate we hit the API
+    at.  Store writes stay on the main thread -- parquet upserts are not
+    thread-safe, and they are not the bottleneck.
 
     ``progress`` is called as ``progress(fraction_done, message)`` so a UI with
     no console can show what is happening during a multi-minute pull.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     store = store or Store()
     client = client or CFBDClient()
     counts: dict[str, int] = {}
-    total = max(len(years), 1)
 
-    def _report(i: int, msg: str):
+    endpoints: list[tuple[str, Any]] = [
+        ("games", client.games),
+        ("lines", client.lines),
+        ("sp_ratings", client.sp_ratings),
+        ("talent", client.talent),
+        ("returning", client.returning_production),
+        ("advanced_season", client.advanced_season_stats),
+        ("team_games", client.team_game_stats),
+        ("portal", client.transfer_portal),
+        ("player_ppa", client.player_season_ppa),
+    ]
+    tasks = [(table, fn, yr) for yr in years for table, fn in endpoints]
+    total = len(tasks) + (len(years) if include_plays else 0)
+    done = 0
+
+    def _report(msg: str):
         if progress:
-            progress(min(i / total, 1.0), msg)
+            progress(min(done / max(total, 1), 1.0), msg)
 
-    def _add(table: str, df: pd.DataFrame):
-        if df is not None and not df.empty:
-            store.upsert(table, df)
-            counts[table] = counts.get(table, 0) + len(df)
-            log.info("%-16s +%d rows", table, len(df))
+    def _run(task):
+        table, fn, yr = task
+        try:
+            return table, yr, fn(yr)
+        except Exception as exc:  # noqa: BLE001 - a missing endpoint is not fatal
+            log.warning("%s %s failed: %s", table, yr, exc)
+            return table, yr, pd.DataFrame()
 
-    for i, yr in enumerate(years):
-        log.info("=== season %d ===", yr)
-        _report(i, f"season {yr}: games and lines")
-        _add("games", client.games(yr))
-        _add("lines", client.lines(yr))
-        _report(i, f"season {yr}: ratings, talent, box scores")
-        for name, fn in (
-            ("sp_ratings", client.sp_ratings),
-            ("talent", client.talent),
-            ("returning", client.returning_production),
-            ("advanced_season", client.advanced_season_stats),
-            ("team_games", client.team_game_stats),
-        ):
-            try:
-                _add(name, fn(yr))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("%s %s failed: %s", name, yr, exc)
-        if include_plays:
-            _report(i, f"season {yr}: play-by-play (slow)")
-            _add("plays", client.plays_season(yr, weeks=play_weeks))
-        _report(i + 1, f"season {yr}: done")
+    _report(f"fetching {len(years)} season(s) ...")
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for table, yr, df in pool.map(_run, tasks):
+            done += 1
+            if df is not None and not df.empty:
+                store.upsert(table, df)
+                counts[table] = counts.get(table, 0) + len(df)
+            _report(f"{table} {yr}")
+
+    if include_plays:
+        for yr in years:
+            _report(f"season {yr}: play-by-play (slow)")
+            df = client.plays_season(yr, weeks=play_weeks, max_workers=max_workers)
+            done += 1
+            if not df.empty:
+                store.upsert("plays", df)
+                counts["plays"] = counts.get("plays", 0) + len(df)
+    _report("fetch complete")
     return counts

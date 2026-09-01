@@ -268,6 +268,100 @@ guess** when neither resolves. Always run `--dry-run` and read the
 
 ---
 
+## 8b. The transfer portal: what was built and what it measured
+
+The team ratings learn who a team is *from results*, which works once games are
+played but leaves the preseason estimate as "last year's team, regressed toward
+the mean". In the portal era that assumption is weaker than it used to be. Two
+things were built to address it, and both are **off by default** because of what
+the measurements said.
+
+### What the model could and could not see
+
+| | Before | Now available |
+|---|---|---|
+| Who **left** | Partially, via returning production | Split by phase, plus portal departures |
+| Who **arrived** | Nothing at all | Portal arrivals, counts and ratings |
+| Who plays **quarterback** | Nothing at all | Returning / transfer / new, and prior-season value |
+
+### Option 1 — roster-continuity features (`include_roster`)
+
+`cfb/features/roster.py` turns the portal and per-player PPA tables into ~30
+team-level columns: net portal traffic weighted by rating, returning production
+by phase, and explicit quarterback continuity.
+
+**The leak trap.** The obvious way to identify a starting quarterback is
+"whoever took the most snaps this season" — knowable only once the season is
+over, and it would leak a season's outcome into its own week-1 game. Everything
+is instead built from *last* season's player stats plus the *offseason* portal.
+Continuity is matched on player ids across seasons, not names, because CFBD's
+portal feed does not reliably carry ids and name matching is fragile.
+
+### Option 2 — roster-aware ratings prior (`use_roster_prior`)
+
+`cfb/features/preseason.py` learns the mapping *(last season's rating, who came
+back, who arrived, who plays quarterback) → this season's rating* from history,
+and hands it to the ridge as a per-team shrinkage target. Minimising
+`|W^.5(y − Xβ)|² + λ|β − p|²` just adds `λp` to the right-hand side of the
+normal equations. The carryover mapping for season S is fit only on transitions
+that finished before S, and there is a test asserting the target season's own
+results cannot change its priors.
+
+### What it measured
+
+Measured on the bundled synthetic league, which was extended for this work so
+that year-over-year carryover genuinely depends on returning production, portal
+flux and quarterback continuity (roster facts explain R² ≈ 0.25 of the rating
+change — partial, as in reality).
+
+**Predicting next season's rating** — the thing the prior is for:
+
+| | MAE |
+|---|---|
+| Last season's rating, reused | 1.250 |
+| Optimally shrunk toward the mean | 1.029 |
+| ...plus roster features | 1.019 |
+| ...with *perfect* roster knowledge (oracle) | 1.007 |
+
+Shrinkage is worth 18%. Roster features are worth 0.9% on top of it, against a
+ceiling of 2.2% even with the generator's own latent values. The reason is
+structural and probably generalises: **most of what returning production tells
+you is "regress this team harder", and calibrated shrinkage already regresses
+everyone.** The incremental information is *which* teams to regress more or
+less, which is worth much less than the shrinkage itself.
+
+**End-to-end model accuracy**, four synthetic seeds, walk-forward ridge:
+
+| variant | Δ MAE vs baseline | sd |
+|---|---|---|
+| roster features | **+0.037** (worse) | 0.022 |
+| roster prior | +0.010 (neutral) | 0.013 |
+| both | **+0.050** (worse) | 0.032 |
+
+The feature block is consistently worse across all four seeds: thirty
+low-signal columns buy variance, not accuracy. The prior improves the *ratings*
+themselves by ~0.11 MAE but is neutral downstream, because the model reaches the
+same information through Elo, form, talent and prior-season SP+.
+
+### Why they ship anyway, and off
+
+The synthetic league cannot settle this. Its roster effects are an invention of
+the generator, and the 2.2% oracle ceiling is a property of that invention, not
+of college football. Real data — especially real quarterback effects, which are
+plausibly larger than modelled here — may say something different.
+
+So the machinery is built, tested and leak-free, and defaults to off. Run
+`cfb ablate` (or the Backtest page's ablation button) once you have real portal
+and player-PPA data; it runs exactly the four-way comparison above. Turn the
+options on if and only if that comes back negative.
+
+If you want to try reviving option 1, the most promising trim is to keep only
+`qb_continuity_diff`, `portal_net_rating_diff` and `returning_off_diff` rather
+than all thirty columns — most of the added variance is columns carrying almost
+no signal.
+
+---
+
 ## 9. Known limitations
 
 Things this model does not know, in rough order of how much they cost you:
@@ -281,6 +375,9 @@ Things this model does not know, in rough order of how much they cost you:
 - **Travel and altitude.** Rest days are in there; distance and altitude are not.
 - **In-season improvement.** A team with a new quarterback in October is treated
   as the average of its season.
+- **Mid-season personnel.** The portal work above addresses roster *construction*
+  in the offseason. Who is available *this Saturday* is a different and probably
+  more valuable problem, and is not modelled at all.
 - **Pace and possession count.** Modelled crudely — the drive simulator assumes a
   league-average pace rather than a team-specific one.
 - **FCS opponents.** Non-FBS teams get individual ratings from very few games.
@@ -294,6 +391,8 @@ Each of those is a reasonable next thing to build. Injuries first.
 
 ```
 cfb/pipeline.py                  the Predictor object — start here
+cfb/features/roster.py           portal / quarterback continuity
+cfb/features/preseason.py        the roster-aware ratings prior
 cfb/distribution/margin.py       the PMF and its market queries
 cfb/features/build.py            the leak-free feature construction
 cfb/features/ratings.py          the ridge ratings

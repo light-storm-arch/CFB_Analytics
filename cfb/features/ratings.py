@@ -96,13 +96,22 @@ def fit_off_def_ratings(
     ridge_lambda: float = 45.0,
     cap_points: float | None = 52.0,
     min_weight: float = 0.01,
+    prior_offense: dict[str, float] | None = None,
+    prior_defense: dict[str, float] | None = None,
 ) -> RatingFit:
     """Weighted ridge on points scored -> per-team offence/defence ratings.
 
     ``ridge_lambda`` is in units of effective games: a team with roughly
-    ``ridge_lambda`` weighted games is pulled halfway to the league mean.
+    ``ridge_lambda`` weighted games is pulled halfway toward the prior.
     ``cap_points`` soft-caps blowout scoring so a 70-point game does not
     dominate; set to None to disable.
+
+    ``prior_offense`` / ``prior_defense`` shrink each team toward a *specific*
+    value instead of toward the league mean.  That is the difference between
+    "we know nothing about this team in week 1" and "we expect this team to be
+    about this good, because of who is on the roster".  Minimising
+    ``|W^.5(y - XB)|^2 + lambda*|B - p|^2`` just adds ``lambda * p`` to the
+    right-hand side of the normal equations.
     """
     g = games.loc[games["completed"].astype(bool)].copy() if "completed" in games \
         else games.copy()
@@ -169,6 +178,16 @@ def fit_off_def_ratings(
     penalty[HA] = 1e-6
     penalty[IC] = 1e-8
     A[np.diag_indices_from(A)] += penalty
+
+    # Shrink toward the supplied prior rather than toward zero.
+    if prior_offense or prior_defense:
+        p_vec = np.zeros(n_p)
+        for team, i in idx.items():
+            if prior_offense:
+                p_vec[OFF + i] = float(prior_offense.get(team, 0.0) or 0.0)
+            if prior_defense:
+                p_vec[DEF + i] = float(prior_defense.get(team, 0.0) or 0.0)
+        b = b + penalty * p_vec
 
     beta = np.linalg.solve(A, b)
 
