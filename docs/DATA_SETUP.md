@@ -76,6 +76,15 @@ Hosted equivalents: the **Setup → Load data** tab for a one-off pull, or the
 | `/stats/season/advanced` | `advanced_season` | efficiency stats |
 | `/games/teams` | `team_games` | per-game team box scores |
 | `/plays` | `plays` | play-by-play, for the trained live model |
+| `/player/portal` | `portal` | transfer portal moves (portal-era features) |
+| `/ppa/players/season` | `player_ppa` | per-player value, incl. quarterback continuity |
+
+**Run `cfb probe` once your key works.** The player and portal endpoints could
+not be exercised against the live API while this was written, so the probe
+reports which ones actually return data for your key and flags anything that has
+moved or been renamed. The roster features degrade gracefully when a source is
+missing — they are dropped, not faked — so a silently empty endpoint would
+otherwise show up much later as a column of nulls.
 
 How much history? **8–10 seasons is the sweet spot.** More is not automatically
 better: the sport changed materially around 2014 (pace) and 2021 (transfer portal,

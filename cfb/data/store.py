@@ -22,6 +22,10 @@ TABLE_KEYS: dict[str, list[str]] = {
     "plays": ["play_id"],
     "drives": ["drive_id"],
     "pbp_states": ["play_id"],
+    "portal": ["season", "player_id", "destination"],
+    "player_ppa": ["season", "player_id", "team"],
+    "rosters": ["season", "player_id", "team"],
+    "recruits": ["season", "name", "team"],
 }
 
 

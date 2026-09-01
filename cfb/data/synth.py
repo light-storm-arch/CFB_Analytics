@@ -46,6 +46,13 @@ class SynthConfig:
     def_sd: float = 0.20
     market_noise: float = 1.6
     unplayed_last_week: bool = True
+    # Roster churn. `*_effect` control how much of the year-over-year rating
+    # change roster facts explain; deliberately partial, since coaching and
+    # development explain plenty that no roster feature can see.
+    portal_sd: float = 1.0
+    portal_effect: float = 0.075
+    qb_sd: float = 0.55
+    qb_effect: float = 0.30
     seed: int = 7
 
 
@@ -93,9 +100,15 @@ class SyntheticLeague:
         correlation is what makes team strength vary a lot (a 17-point margin
         sd) while game totals stay in a narrow band (~54 +/- 14): when an elite
         offence meets an elite defence the two effects cancel in the total but
-        add in the margin.  Drawing offence and defence independently -- or
-        worse, anti-correlated -- produces 190-point games and a total model
-        with nothing to learn.
+        add in the margin.
+
+        **Year-over-year carryover is roster-driven**, which is the whole point
+        of this generator for the portal-era work.  A team that returns most of
+        its production and keeps its quarterback carries nearly all of last
+        year's rating forward; a team that is gutted and starts a freshman
+        regresses hard toward its recruiting baseline.  Roster facts explain
+        only part of the change -- the rest is coaching, development and luck --
+        so a model that finds *all* of this signal is over-fitting.
         """
         cfg, rng = self.cfg, self.rng
         n = cfg.n_teams
@@ -103,26 +116,60 @@ class SyntheticLeague:
         conf_bump = self.teams["conference"].map(
             lambda c: 0.20 if c in CONFERENCES[:5] else -0.16).to_numpy()
 
-        def draw(prev_off=None, prev_def=None):
+        def fresh():
             strength = conf_bump + rng.normal(0, cfg.strength_sd, n)
-            off = STRENGTH_LOADING * strength + rng.normal(0, cfg.off_sd, n)
-            dfn = STRENGTH_LOADING * strength + rng.normal(0, cfg.def_sd, n)
-            if prev_off is None:
-                return off, dfn
-            k = np.sqrt(1 - YEAR_CARRYOVER ** 2)
-            return (YEAR_CARRYOVER * prev_off + k * off,
-                    YEAR_CARRYOVER * prev_def + k * dfn)
+            return (STRENGTH_LOADING * strength + rng.normal(0, cfg.off_sd, n),
+                    STRENGTH_LOADING * strength + rng.normal(0, cfg.def_sd, n))
 
-        off, dfn = draw()
-        rows = []
+        off, dfn = fresh()
+        rows, roster_rows = [], []
+        prev_qb_quality = rng.normal(0, cfg.qb_sd, n)
+
         for s in range(cfg.n_seasons):
             season = cfg.start_season + s
-            if s > 0:
-                off, dfn = draw(off, dfn)
+            if s == 0:
+                ret_frac = rng.beta(6, 3, n)
+                portal_net = np.zeros(n)
+                qb_status = np.array(["returning"] * n, dtype=object)
+                qb_quality = prev_qb_quality
+            else:
+                # --- roster churn for this offseason ---
+                ret_frac = rng.beta(5, 3, n)                     # ~0.63 mean
+                portal_net = rng.normal(0, cfg.portal_sd, n)
+                roll = rng.random(n)
+                qb_status = np.where(roll < 0.55, "returning",
+                                     np.where(roll < 0.85, "transfer", "freshman"))
+                qb_quality = np.where(
+                    qb_status == "returning",
+                    prev_qb_quality + rng.normal(0.05, 0.25, n),   # small development
+                    np.where(qb_status == "transfer",
+                             rng.normal(0.10, cfg.qb_sd, n),       # portal QBs skew up
+                             rng.normal(-0.25, cfg.qb_sd, n)))     # freshmen skew down
+
+                # Carryover is a function of what actually came back.
+                carry = np.clip(
+                    0.34 + 0.42 * ret_frac + 0.10 * (qb_status == "returning"),
+                    0.20, 0.92)
+                base_off, base_def = fresh()
+                shock = np.sqrt(np.clip(1 - carry ** 2, 0.01, None))
+                off = (carry * off + shock * base_off
+                       + cfg.portal_effect * portal_net
+                       + cfg.qb_effect * (qb_quality - prev_qb_quality))
+                dfn = carry * dfn + shock * base_def + cfg.portal_effect * portal_net
+
             for i, team in enumerate(self.teams["team"]):
-                rows.append({"season": season, "team": team,
-                             "true_off": float(off[i]), "true_def": float(dfn[i]),
-                             "true_rating": float((off[i] + dfn[i]) * DRIVES_MEAN * 0.82)})
+                rows.append({
+                    "season": season, "team": team,
+                    "true_off": float(off[i]), "true_def": float(dfn[i]),
+                    "true_rating": float((off[i] + dfn[i]) * DRIVES_MEAN * 0.82),
+                    "true_ret_frac": float(ret_frac[i]),
+                    "true_portal_net": float(portal_net[i]),
+                    "true_qb_status": str(qb_status[i]),
+                    "true_qb_quality": float(qb_quality[i]),
+                })
+            prev_qb_quality = qb_quality
+
+        self._roster_rows = roster_rows
         return pd.DataFrame(rows)
 
     # -- schedule ---------------------------------------------------------
@@ -227,7 +274,125 @@ class SyntheticLeague:
             games.loc[mask, ["home_points", "away_points", "margin", "total"]] = np.nan
             games.loc[mask, "completed"] = False
         return {"games": games, "lines": lines, "truth": self.ratings.copy(),
-                "teams": self.teams.copy(), **self._preseason_tables()}
+                "teams": self.teams.copy(), **self._preseason_tables(),
+                **self._roster_tables()}
+
+    def _roster_tables(self) -> dict[str, pd.DataFrame]:
+        """Portal / player-PPA / returning tables in the shapes CFBD returns.
+
+        Generated *from* the latent churn that drove the rating dynamics, so the
+        feature code exercises exactly the path it will with real data and the
+        signal it finds is genuinely there rather than assumed.
+
+        Transfer quarterbacks reuse a real player id from whichever team did not
+        bring its starter back, because that is how continuity is actually
+        detected downstream: the same id appearing for a *different* team last
+        season.  Matching on names would be fragile on real data and would make
+        this generator a poor rehearsal for it.
+        """
+        rng = np.random.default_rng(self.cfg.seed + 3)
+        POSITIONS = ["QB", "RB", "WR", "TE", "OL", "DL", "LB", "DB"]
+        truth = self.ratings
+        seasons = sorted(truth["season"].unique())
+
+        portal_rows, ppa_rows, returning_rows = [], [], []
+        prev_qb: dict[str, str] = {}         # team -> last season's QB1 id
+        next_id = [900_000]
+
+        def new_id() -> str:
+            next_id[0] += 1
+            return str(next_id[0])
+
+        for season in seasons:
+            block = truth[truth["season"] == season]
+            statuses = dict(zip(block["team"], block["true_qb_status"]))
+            # Starters whose teams are not bringing them back become the pool
+            # available to teams taking a portal quarterback.
+            pool = [(prev_qb[t], t) for t, st in statuses.items()
+                    if st != "returning" and t in prev_qb]
+            rng.shuffle(pool)
+            pool_idx = 0
+            qb_now: dict[str, str] = {}
+
+            for r in block.itertuples():
+                team = r.team
+                status = r.true_qb_status
+                qb_from = None
+                if status == "returning" and team in prev_qb:
+                    qb_id, via = prev_qb[team], None
+                elif status == "transfer" and pool_idx < len(pool):
+                    # Never hand a team back its own departing starter.
+                    while pool_idx < len(pool) and pool[pool_idx][0] == prev_qb.get(team):
+                        pool_idx += 1
+                    if pool_idx < len(pool):
+                        qb_id, qb_from = pool[pool_idx]
+                        via = "portal"
+                        pool_idx += 1
+                    else:
+                        qb_id, via = new_id(), "freshman"
+                else:
+                    qb_id, via = new_id(), "freshman"
+                qb_now[team] = qb_id
+
+                qb_ppa = 0.12 + 0.18 * r.true_qb_quality + rng.normal(0, 0.04)
+                plays = int(abs(rng.normal(520, 90))) + 60
+                ppa_rows.append({
+                    "season": int(season), "player_id": qb_id, "name": f"QB {qb_id}",
+                    "position": "QB", "team": team, "plays": plays,
+                    "avg_ppa_all": float(qb_ppa),
+                    "total_ppa_all": float(qb_ppa * plays),
+                })
+                for pos in rng.choice(POSITIONS[1:], size=6, replace=True):
+                    v = 0.05 + 0.10 * r.true_rating / 12.0 + rng.normal(0, 0.06)
+                    pl = int(abs(rng.normal(300, 120))) + 20
+                    ppa_rows.append({
+                        "season": int(season), "player_id": new_id(),
+                        "name": f"{pos} {next_id[0]}", "position": str(pos),
+                        "team": team, "plays": pl, "avg_ppa_all": float(v),
+                        "total_ppa_all": float(v * pl),
+                    })
+
+                n_in = int(np.clip(rng.poisson(5) + 1, 1, 14))
+                n_out = int(np.clip(rng.poisson(5) + 1, 1, 14))
+                in_rating = 0.80 + 0.06 * r.true_portal_net + rng.normal(0, 0.05, n_in)
+                out_rating = 0.80 - 0.06 * r.true_portal_net + rng.normal(0, 0.05, n_out)
+                for k in range(n_in):
+                    is_qb = (k == 0 and via == "portal")
+                    portal_rows.append({
+                        "season": int(season),
+                        "player_id": qb_id if is_qb else new_id(),
+                        "name": f"In {season}-{team}-{k}",
+                        "position": "QB" if is_qb else str(rng.choice(POSITIONS[1:])),
+                        "origin": (qb_from if is_qb and qb_from else "Team OTHER"),
+                        "destination": team,
+                        "rating": float(np.clip(in_rating[k], 0.4, 1.0)),
+                        "stars": int(np.clip(round(in_rating[k] * 5), 2, 5)),
+                    })
+                for k in range(n_out):
+                    portal_rows.append({
+                        "season": int(season), "player_id": new_id(),
+                        "name": f"Out {season}-{team}-{k}",
+                        "position": str(rng.choice(POSITIONS)),
+                        "origin": team, "destination": "Team OTHER",
+                        "rating": float(np.clip(out_rating[k], 0.4, 1.0)),
+                        "stars": int(np.clip(round(out_rating[k] * 5), 2, 5)),
+                    })
+
+                ret = float(np.clip(r.true_ret_frac + rng.normal(0, 0.05), 0.05, 0.98))
+                returning_rows.append({
+                    "season": int(season), "team": team, "returning_ppa": ret,
+                    "returning_offense_ppa": float(np.clip(ret + rng.normal(0, 0.08), 0.02, 0.99)),
+                    "returning_defense_ppa": float(np.clip(ret + rng.normal(0, 0.08), 0.02, 0.99)),
+                    "usage": float(np.clip(ret + rng.normal(0, 0.06), 0.02, 0.99)),
+                    "percent_ppa": ret,
+                })
+            prev_qb = qb_now
+
+        return {
+            "portal": pd.DataFrame(portal_rows),
+            "player_ppa": pd.DataFrame(ppa_rows),
+            "returning": pd.DataFrame(returning_rows),
+        }
 
     def _preseason_tables(self) -> dict[str, pd.DataFrame]:
         """Noisy stand-ins for recruiting talent, returning production and SP+."""
@@ -238,18 +403,13 @@ class SyntheticLeague:
             "season": r["season"], "team": r["team"],
             "talent": 700 + 55 * r["true_rating"] + rng.normal(0, 90, n),
         })
-        returning = pd.DataFrame({
-            "season": r["season"], "team": r["team"],
-            "returning_ppa": np.clip(rng.beta(5, 4, n), 0.05, 0.95),
-            "usage": np.clip(rng.beta(5, 4, n), 0.05, 0.95),
-        })
         sp = pd.DataFrame({
             "season": r["season"], "team": r["team"],
             "sp_overall": r["true_rating"] + rng.normal(0, 3.0, n),
             "sp_offense": 28 + r["true_off"] * 8 + rng.normal(0, 2.5, n),
             "sp_defense": 28 - r["true_def"] * 8 + rng.normal(0, 2.5, n),
         })
-        return {"talent": talent, "returning": returning, "sp_ratings": sp}
+        return {"talent": talent, "sp_ratings": sp}
 
     @staticmethod
     def _true_mu(q_h: float, q_a: float, n_drives: float = DRIVES_MEAN) -> float:
@@ -342,7 +502,7 @@ def build_synthetic_store(cfg: SynthConfig | None = None, store=None,
     store.write("games", data["games"])
     store.write("lines", data["lines"])
     store.write("synth_truth", data["truth"])
-    for name in ("talent", "returning", "sp_ratings"):
+    for name in ("talent", "returning", "sp_ratings", "portal", "player_ppa"):
         store.write(name, data[name])
     out = {"games": len(data["games"]), "lines": len(data["lines"])}
     if with_pbp:

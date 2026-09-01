@@ -225,11 +225,55 @@ def train_predictor(features: pd.DataFrame, cfg: PredictorConfig | None = None,
 # ---------------------------------------------------------------------- #
 # Data assembly
 # ---------------------------------------------------------------------- #
+#: Tables whose contents change the feature table.
+FEATURE_INPUTS = ("games", "lines", "talent", "returning", "sp_ratings",
+                  "portal", "player_ppa", "rosters")
+
+
+def feature_cache_key(store: Store, cfg: FeatureConfig,
+                      seasons: list[int] | None) -> str:
+    """Fingerprint of everything that can change the feature table."""
+    import hashlib
+    from dataclasses import asdict
+
+    parts: list[str] = []
+    for table in FEATURE_INPUTS:
+        path = store.path(table)
+        if path.exists():
+            st = path.stat()
+            parts.append(f"{table}:{st.st_size}:{st.st_mtime_ns}")
+        else:
+            parts.append(f"{table}:-")
+    parts.append(repr(sorted(asdict(cfg).items())))
+    parts.append(repr(sorted(seasons) if seasons else None))
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:20]
+
+
 def load_features(store: Store | None = None, cfg: FeatureConfig | None = None,
                   seasons: list[int] | None = None,
-                  progress: bool = False) -> pd.DataFrame:
-    """Read the local store and build the feature table."""
+                  progress: bool = False,
+                  use_cache: bool = True) -> pd.DataFrame:
+    """Read the local store and build the feature table.
+
+    The build is deterministic in its inputs, so the result is cached on disk
+    under a fingerprint of the source tables plus the feature config.  Training,
+    backtesting and every dashboard page otherwise rebuild the same frame from
+    scratch; a data refresh changes the fingerprint and invalidates it.
+    """
     store = store or Store()
+    cfg = cfg or FeatureConfig()
+
+    cache_path = None
+    if use_cache:
+        cache_dir = store.cfg.data_dir / "cache"
+        cache_path = cache_dir / f"features_{feature_cache_key(store, cfg, seasons)}.parquet"
+        if cache_path.exists():
+            try:
+                log.debug("feature cache hit: %s", cache_path)
+                return pd.read_parquet(cache_path)
+            except Exception:  # noqa: BLE001 - a corrupt cache must never be fatal
+                cache_path.unlink(missing_ok=True)
+
     games = store.read("games")
     if games.empty:
         raise FileNotFoundError(
@@ -238,15 +282,33 @@ def load_features(store: Store | None = None, cfg: FeatureConfig | None = None,
         )
     if seasons:
         games = games[games["season"].isin(seasons)]
-    return build_features(
+    feats = build_features(
         games,
         lines=store.read("lines"),
         talent=store.read("talent"),
         returning=store.read("returning"),
         sp_ratings=store.read("sp_ratings"),
-        cfg=cfg or FeatureConfig(),
+        portal=store.read("portal"),
+        player_ppa=store.read("player_ppa"),
+        cfg=cfg,
         progress=progress,
     )
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            feats.to_parquet(cache_path, index=False)
+            _prune_feature_cache(cache_path.parent)
+        except Exception as exc:  # noqa: BLE001 - caching is an optimisation
+            log.debug("could not write feature cache: %s", exc)
+    return feats
+
+
+def _prune_feature_cache(cache_dir: Path, keep: int = 4) -> None:
+    """Keep only the newest few cached frames; each is a few MB."""
+    files = sorted(cache_dir.glob("features_*.parquet"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in files[keep:]:
+        old.unlink(missing_ok=True)
 
 
 def artifacts_dir(name: str = "default") -> Path:

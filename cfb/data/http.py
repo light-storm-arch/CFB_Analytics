@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import random
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,10 @@ class JsonClient:
         self.max_retries = max_retries
         self.min_interval = min_interval
         self._last_call = 0.0
+        # Guards the rate limiter so concurrent workers still share one global
+        # request rate. Threads overlap network *latency*, they do not raise the
+        # rate we hit the API at -- CFBD is a small free service.
+        self._rate_lock = threading.Lock()
         self.cache_dir = cache_dir
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -58,6 +63,16 @@ class JsonClient:
         digest = hashlib.sha256(key.encode()).hexdigest()[:24]
         safe = path.strip("/").replace("/", "_") or "root"
         return self.cache_dir / f"{safe}.{digest}.json"
+
+    def _throttle(self) -> None:
+        """Block until at least ``min_interval`` has passed since the last start."""
+        if not self.min_interval:
+            return
+        with self._rate_lock:
+            delta = time.monotonic() - self._last_call
+            if delta < self.min_interval:
+                time.sleep(self.min_interval - delta)
+            self._last_call = time.monotonic()
 
     # -- request -----------------------------------------------------------
     def get(
@@ -80,12 +95,8 @@ class JsonClient:
         url = f"{self.base_url}/{path.lstrip('/')}"
         last_exc: Exception | None = None
         for attempt in range(self.max_retries):
-            if self.min_interval:
-                delta = time.monotonic() - self._last_call
-                if delta < self.min_interval:
-                    time.sleep(self.min_interval - delta)
+            self._throttle()
             try:
-                self._last_call = time.monotonic()
                 resp = self.session.get(url, params=params, timeout=self.timeout)
                 if resp.status_code in RETRY_STATUS:
                     raise HttpError(resp.status_code, url, resp.text)

@@ -297,14 +297,34 @@ def page_setup(status, creds, names):
                 "use the betting line as a feature", value=False,
                 help="Much more accurate, much less useful for finding edges — "
                      "it learns to copy the market. Leave off to hunt for edges.")
+            with st.expander("portal-era options (experimental, off by default)"):
+                st.caption(
+                    "Roster-continuity work aimed at the transfer portal. On the "
+                    "bundled synthetic league the feature block measured **worse** "
+                    "(+0.037 MAE, sd 0.022 over four seeds) and the prior measured "
+                    "neutral (+0.010, sd 0.013). They need real portal and "
+                    "player-PPA data to be worth anything — run the ablation on "
+                    "the Backtest page before turning either on.")
+                c5, c6 = st.columns(2)
+                include_roster = c5.checkbox(
+                    "roster-continuity features", value=False,
+                    help="Portal flux, returning production by phase, and QB "
+                         "continuity as ~30 extra model inputs.")
+                use_roster_prior = c6.checkbox(
+                    "roster-aware preseason prior", value=False,
+                    help="Shrink early-season ratings toward a fitted prior from "
+                         "last season plus roster facts, instead of toward the "
+                         "league mean.")
             art_name = st.text_input("save as", "default")
 
             if st.button("Train", type="primary", width="stretch"):
                 out = run_with_progress(
                     f"Training {model_name}", bootstrap.train_model,
                     model_name=model_name, members=tuple(members or ["ridge"]),
-                    include_market=include_market, dist_method=dist_method,
-                    refit=refit, name=art_name)
+                    include_market=include_market,
+                    include_roster=include_roster,
+                    use_roster_prior=use_roster_prior,
+                    dist_method=dist_method, refit=refit, name=art_name)
                 if out is not None:
                     predictor, oos = out
                     from cfb.evaluation.backtest import backtest_report
@@ -543,6 +563,21 @@ def page_backtest(predictor):
                          min(800, len(oos)), step=100)
     if st.button("Run calibration"):
         _run_calibration(predictor, oos, methods, n_sample)
+
+    st.divider()
+    st.subheader("Portal-era ablation")
+    st.caption("Runs the walk-forward four ways — baseline, roster features, "
+               "roster prior, both — so you can see whether the transfer-portal "
+               "work helps *your* data. Slow: four full walk-forwards per model.")
+    ab_models = st.multiselect("models", sorted(MODEL_REGISTRY), default=["ridge"],
+                               key="ablate_models")
+    if st.button("Run ablation"):
+        out = run_with_progress("Running ablation", bootstrap.roster_ablation,
+                                tuple(ab_models or ["ridge"]))
+        if out is not None and not out.empty:
+            st.dataframe(out.round(4), width="stretch", hide_index=True)
+            st.caption("Negative `vs_baseline` means the option helped. Anything "
+                       "under about 0.05 MAE on a few thousand games is noise.")
 
 
 def _run_calibration(predictor, oos, methods, n_sample):

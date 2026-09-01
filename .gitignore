@@ -14,8 +14,9 @@ dist/
 .streamlit/secrets.toml
 *.pem
 
-# Raw API response cache -- large, regenerable, and pointless in git.
+# Raw API response cache and derived feature cache -- large, regenerable.
 /data/raw/
+/data/cache/
 
 # The processed parquet store IS committed: it is small (~2 MB) and it is what
 # lets the hosted app boot with data on a cold start, since Streamlit Cloud's

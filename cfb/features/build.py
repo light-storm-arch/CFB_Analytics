@@ -24,6 +24,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from cfb.features._rolling import group_codes, trailing_count, trailing_mean
+from cfb.features.preseason import priors_for_season
+from cfb.features.roster import build_roster_features
 from cfb.features.ratings import RatingFit, elo_ratings, fit_off_def_ratings
 
 log = logging.getLogger(__name__)
@@ -54,6 +57,15 @@ PRIOR_FEATURES = [
     "returning_home", "returning_away", "returning_diff",
     "sp_prev_home", "sp_prev_away", "sp_prev_diff",
 ]
+#: Roster-continuity block. All preseason-known; see cfb.features.roster.
+ROSTER_FEATURE_STEMS = [
+    "portal_net_rating", "portal_in_count", "portal_out_count", "portal_in_best",
+    "qb_prior_ppa", "qb_departed", "qb_transfer_in", "qb_continuity",
+    "returning_off", "returning_def",
+]
+ROSTER_FEATURES = [f"{stem}_{side}" for stem in ROSTER_FEATURE_STEMS
+                   for side in ("home", "away", "diff")]
+
 MARKET_FEATURES = ["market_margin", "market_total", "market_margin_open", "line_move"]
 
 TARGETS = ["margin", "total", "home_win"]
@@ -66,6 +78,18 @@ class FeatureConfig:
     cap_points: float | None = 52.0
     form_window: int = 3
     include_market: bool = False
+    #: Roster-continuity feature block (portal flux, QB continuity).
+    #: OFF by default: measured across four synthetic seasons-sets it costs
+    #: +0.037 MAE (sd 0.022) -- thirty extra low-signal columns buy variance,
+    #: not accuracy. Turn on and re-measure once you have real data;
+    #: `cfb ablate` runs exactly that comparison.
+    include_roster: bool = False
+    #: Shrink early-season ratings toward a fitted preseason prior instead of
+    #: toward the league mean (cfb.features.preseason). Improves the ratings
+    #: themselves by ~0.11 MAE but is neutral downstream (+0.010, sd 0.013),
+    #: because the model has other paths to the same information.
+    use_roster_prior: bool = False
+    prior_alpha: float = 5.0
     min_history_games: int = 150
     pool_non_fbs: bool = True
 
@@ -121,21 +145,24 @@ def team_game_long(games: pd.DataFrame) -> pd.DataFrame:
 
 
 def rolling_form(long: pd.DataFrame, window: int = 3) -> pd.DataFrame:
-    """Trailing form per team-season, always excluding the current game."""
-    g = long.groupby(["team", "season"], sort=False)
+    """Trailing form per team-season, always excluding the current game.
 
-    def _roll(col):
-        return g[col].transform(lambda s: s.shift(1).rolling(window, min_periods=1).mean())
+    ``long`` must already be sorted by (team, start_date), which
+    ``team_game_long`` guarantees -- the prefix-sum helpers rely on it.
+    """
+    codes = group_codes(long["team"].to_numpy(), long["season"].to_numpy())
 
     out = long[["game_id", "team", "season", "start_date"]].copy()
-    out["form_margin"] = _roll("margin")
-    out["form_points_for"] = _roll("points_for")
-    out["form_points_against"] = _roll("points_against")
-    out["form_total"] = _roll("game_total")
-    out["played"] = g.cumcount()
-    prev_date = g["start_date"].shift(1)
-    out["rest_days"] = (long["start_date"] - prev_date).dt.total_seconds() / 86400.0
-    out["rest_days"] = out["rest_days"].fillna(14.0).clip(3, 30)
+    for src, dest in (("margin", "form_margin"),
+                      ("points_for", "form_points_for"),
+                      ("points_against", "form_points_against"),
+                      ("game_total", "form_total")):
+        out[dest] = trailing_mean(long[src].to_numpy(), codes, window)
+    out["played"] = trailing_count(codes)
+
+    prev_date = long.groupby(["team", "season"], sort=False)["start_date"].shift(1)
+    rest = (long["start_date"] - prev_date).dt.total_seconds() / 86400.0
+    out["rest_days"] = rest.fillna(14.0).clip(3, 30)
     return out
 
 
@@ -148,6 +175,8 @@ def build_features(
     talent: pd.DataFrame | None = None,
     returning: pd.DataFrame | None = None,
     sp_ratings: pd.DataFrame | None = None,
+    portal: pd.DataFrame | None = None,
+    player_ppa: pd.DataFrame | None = None,
     cfg: FeatureConfig | None = None,
     progress: bool = False,
 ) -> pd.DataFrame:
@@ -161,9 +190,14 @@ def build_features(
     # ---- Elo forward pass (already leak-free) ----
     elo_df, _ = elo_ratings(g)
 
+    # ---- roster table, needed by both the prior and the feature block ----
+    roster = (build_roster_features(portal, player_ppa, returning)
+              if (cfg.include_roster or cfg.use_roster_prior) else pd.DataFrame())
+
     # ---- walk-forward ratings, refit once per (season, week) ----
     rat_rows: list[dict] = []
     keys = g[["season", "week"]].drop_duplicates().sort_values(["season", "week"])
+    prior_cache: dict[int, tuple[dict, dict]] = {}
     for season, week in keys.itertuples(index=False):
         block = g[(g["season"] == season) & (g["week"] == week)]
         cutoff = block["start_date"].min()
@@ -171,11 +205,22 @@ def build_features(
         if len(history) < 10:
             fit = None
         else:
+            prior_off, prior_def = {}, {}
+            if cfg.use_roster_prior:
+                if season not in prior_cache:
+                    # Priors depend only on seasons strictly before this one, so
+                    # they are computed once per season rather than per week.
+                    prior_cache[season] = priors_for_season(
+                        g[g["completed"]], roster, int(season),
+                        alpha=cfg.prior_alpha)[:2]
+                prior_off, prior_def = prior_cache[season]
             fit = fit_off_def_ratings(
                 history, asof=cutoff,
                 half_life_days=cfg.half_life_days,
                 ridge_lambda=cfg.ridge_lambda,
                 cap_points=cfg.cap_points,
+                prior_offense=prior_off or None,
+                prior_defense=prior_def or None,
             )
         rat_rows.extend(_rating_features(block, fit, len(history)))
         if progress:
@@ -224,6 +269,17 @@ def build_features(
         else:
             feats[h] = feats[a] = feats[f"{stem}_diff"] = np.nan
 
+    # ---- roster continuity (portal era) ----
+    if cfg.include_roster:
+        for stem in ROSTER_FEATURE_STEMS:
+            if stem in roster.columns:
+                feats = _join_team_season(feats, roster, stem, stem)
+            else:
+                feats[f"{stem}_home"] = np.nan
+                feats[f"{stem}_away"] = np.nan
+            h, a = f"{stem}_home", f"{stem}_away"
+            feats[f"{stem}_diff"] = feats[h] - feats[a]
+
     # ---- market ----
     cons = consensus_lines(lines)
     if not cons.empty:
@@ -244,6 +300,8 @@ def build_features(
 def feature_columns(cfg: FeatureConfig | None = None) -> list[str]:
     cfg = cfg or FeatureConfig()
     cols = RATING_FEATURES + ELO_FEATURES + CONTEXT_FEATURES + FORM_FEATURES + PRIOR_FEATURES
+    if cfg.include_roster:
+        cols = cols + ROSTER_FEATURES
     if cfg.include_market:
         cols = cols + MARKET_FEATURES
     return cols
@@ -287,8 +345,8 @@ def _opponent_strength(long: pd.DataFrame, rat: pd.DataFrame, window: int) -> pd
     tmp = long.merge(net, on="game_id", how="left")
     tmp["opp_net"] = np.where(tmp["is_home"], tmp["rat_net_away"], tmp["rat_net_home"])
     tmp = tmp.sort_values(["team", "start_date", "game_id"], kind="stable")
-    grp = tmp.groupby(["team", "season"], sort=False)["opp_net"]
-    tmp["sos"] = grp.transform(lambda s: s.shift(1).expanding().mean())
+    codes = group_codes(tmp["team"].to_numpy(), tmp["season"].to_numpy())
+    tmp["sos"] = trailing_mean(tmp["opp_net"].to_numpy(), codes, None)
     return tmp[["game_id", "team", "sos"]]
 
 
