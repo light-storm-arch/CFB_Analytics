@@ -10,10 +10,26 @@ venv/
 build/
 dist/
 
-# Local data store and trained artifacts (anchored to the repo root, so the
-# `cfb/data/` package is NOT excluded).
-/data/
-/artifacts/
-*.parquet
-*.joblib
+# Secrets, never committed.
+.streamlit/secrets.toml
 *.pem
+
+# Raw API response cache -- large, regenerable, and pointless in git.
+/data/raw/
+
+# The processed parquet store IS committed: it is small (~2 MB) and it is what
+# lets the hosted app boot with data on a cold start, since Streamlit Cloud's
+# filesystem is wiped on every restart. A scheduled Action refreshes it.
+/data/*
+!/data/processed/
+/data/processed/*
+!/data/processed/*.parquet
+
+# ...except play-by-play, which is millions of rows and would bloat the repo.
+/data/processed/plays.parquet
+/data/processed/pbp_states.parquet
+
+# Trained models are not committed: a forest pickle is tens of megabytes and
+# pickles break across library versions. The app retrains on boot instead.
+/artifacts/
+*.joblib

@@ -12,7 +12,6 @@ and order books so the model's fair prices can be compared against them.
 from __future__ import annotations
 
 import base64
-import datetime as dt
 import logging
 import time
 from dataclasses import dataclass
@@ -21,7 +20,7 @@ from typing import Any, Iterable
 import pandas as pd
 import requests
 
-from cfb.config import CONFIG, Config
+from cfb.config import Config, get_config
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +63,7 @@ class KalshiMarket:
 
 class KalshiClient:
     def __init__(self, cfg: Config | None = None, timeout: float = 30.0):
-        self.cfg = cfg or CONFIG
+        self.cfg = cfg or get_config()
         self.base = self.cfg.kalshi_base.rstrip("/")
         self.timeout = timeout
         self.session = requests.Session()

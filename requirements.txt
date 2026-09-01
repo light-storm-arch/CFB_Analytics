@@ -1,0 +1,23 @@
+# Streamlit Community Cloud installs from this file.
+# Kept deliberately loose: Cloud pins the Python version, and over-pinning here
+# is the most common cause of a deploy that resolves for hours and then fails.
+numpy>=1.26
+pandas>=2.1
+scipy>=1.11
+scikit-learn>=1.4
+pyarrow>=15.0
+requests>=2.31
+joblib>=1.3
+click>=8.1
+
+# Models. Both are optional at runtime -- the code falls back to scikit-learn's
+# HistGradientBoosting if they are missing -- but Cloud has room for them.
+xgboost>=2.0
+lightgbm>=4.1
+
+# UI
+streamlit>=1.30
+plotly>=5.18
+
+# Kalshi request signing (only needed for the Kalshi page)
+cryptography>=41.0

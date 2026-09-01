@@ -7,8 +7,17 @@ directly as "Team A wins". Also does in-game (live) probabilities.
 Several models are available and interchangeable behind one flag — ridge, random
 forest, XGBoost, LightGBM, and a stacked ensemble.
 
+**No terminal required.** It deploys to Streamlit Community Cloud, and GitHub
+Actions does the data fetching for you — see **[docs/HOSTING.md](docs/HOSTING.md)**.
+
 ```
-cfb synth                                  # fake universe, no API key needed
+Deploy → add your free CFBD key → press Fetch → press Train
+```
+
+Prefer a terminal? The `cfb` CLI does everything the app does:
+
+```bash
+cfb synth                                  # sample data, no API key needed
 cfb train --model ensemble                 # walk-forward train + save
 cfb game --home "Ohio State" --away "Michigan"
 ```
@@ -73,22 +82,31 @@ them:
 
 ## Getting real data
 
-Everything above runs on synthetic data out of the box. For real games you need
-**one free API key** — see **[docs/DATA_SETUP.md](docs/DATA_SETUP.md)** for the
-step-by-step. Short version:
+Everything runs on bundled sample data out of the box. For real games you need
+**one free API key**.
 
 | Source | What for | What you must do |
 |---|---|---|
-| [CollegeFootballData](https://collegefootballdata.com/key) | games, lines, ratings, play-by-play | **Get a free key**, put it in `.env` |
+| [CollegeFootballData](https://collegefootballdata.com/key) | games, lines, ratings, play-by-play | **Get a free key** |
 | ESPN scoreboard | live in-game state | nothing — public, no key |
 | [Kalshi](https://kalshi.com) | market prices, EV table | optional: create an API key pair |
+
+**Hosted (no terminal):** put the key in your Streamlit app's Secrets, then use
+the Setup page's Fetch and Train buttons. Add the same key as a GitHub Actions
+secret and run the **Refresh data** workflow so the app boots with real data
+after every restart. Full walkthrough: **[docs/HOSTING.md](docs/HOSTING.md)**.
+
+**Locally:**
 
 ```bash
 cp .env.example .env      # paste your CFBD key in
 cfb setup                 # confirms what is configured
-cfb fetch --seasons 2015-2024
+cfb fetch --seasons 2016-2025
 cfb train --model ensemble
 ```
+
+Step-by-step for both, including rate limits and what each endpoint gives you:
+**[docs/DATA_SETUP.md](docs/DATA_SETUP.md)**.
 
 ## Commands
 
@@ -105,9 +123,16 @@ cfb train --model ensemble
 | `cfb live` | Live win probabilities from the ESPN scoreboard |
 | `cfb live-train` | Train the play-by-play in-game model |
 | `cfb kalshi discover` / `cfb kalshi price` | Find CFB markets, rank them by EV |
-| `cfb dashboard` | Streamlit UI |
+| `cfb dashboard` | Streamlit UI (same app that runs on Cloud) |
+
+Every one of those is also a button in the app, so none of it requires a shell.
 
 ## Install
+
+**Hosted:** nothing to install — see [docs/HOSTING.md](docs/HOSTING.md).
+Streamlit Cloud reads `requirements.txt` and `packages.txt` automatically.
+
+**Locally:**
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -174,15 +199,22 @@ A few things worth internalising before you bet:
 
 ## Docs
 
+- **[docs/HOSTING.md](docs/HOSTING.md)** — deploying to Streamlit Cloud with no terminal
 - **[docs/DATA_SETUP.md](docs/DATA_SETUP.md)** — exactly what to do to get live data
 - **[docs/MODELING.md](docs/MODELING.md)** — how each piece works and why
 
 ## Testing
 
 ```bash
-pytest -q       # 80 tests, ~15s, all on synthetic data
+pytest -q       # 95 tests, ~60s, all on synthetic data
 ```
 
-The suite includes an explicit leakage test: changing one game's score must not
-change that game's own features. If that ever fails, every accuracy number in
-the repo is wrong.
+CI runs them on every push against Python 3.11 and 3.12.
+
+Two of them carry most of the weight:
+
+- **Leakage.** Changing one game's score must not change that game's own
+  features. If that fails, every accuracy number in the repo is wrong.
+- **The app runs.** `AppTest` executes the real Streamlit script and walks every
+  page. When the app *is* the product and there is no terminal to debug from, a
+  runtime error in it is the whole thing being down.

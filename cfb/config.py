@@ -32,7 +32,52 @@ def load_dotenv(path: Path | None = None, override: bool = False) -> dict[str, s
     return found
 
 
+def load_streamlit_secrets() -> dict[str, str]:
+    """Copy Streamlit Cloud secrets into the environment.
+
+    On Streamlit Community Cloud there is no ``.env`` -- credentials live in the
+    app's Secrets manager and arrive as ``st.secrets``.  Reading them here means
+    every other module keeps using ``os.environ`` and neither knows nor cares
+    where the app is running.
+
+    Deliberately defensive: ``streamlit`` is an optional dependency, and
+    ``st.secrets`` raises rather than returning empty when no secrets file
+    exists, so both cases must be swallowed.
+    """
+    found: dict[str, str] = {}
+    try:
+        import streamlit as st  # noqa: PLC0415 - optional, and only on Cloud
+    except ImportError:
+        return found
+    try:
+        secrets = dict(st.secrets)
+    except Exception:  # noqa: BLE001 - no secrets configured is normal
+        return found
+    for key in ("CFBD_API_KEY", "CFBD_API_BASE", "KALSHI_ACCESS_KEY",
+                "KALSHI_PRIVATE_KEY", "KALSHI_PRIVATE_KEY_PATH", "KALSHI_API_BASE",
+                "CFB_DATA_DIR", "CFB_ARTIFACTS_DIR"):
+        val = secrets.get(key)
+        if val and not os.environ.get(key):
+            os.environ[key] = str(val)
+            found[key] = str(val)
+    # Kalshi hands you a .pem file; pasting its contents into secrets is the
+    # only option on a host with no filesystem you control, so materialise it.
+    pem = secrets.get("KALSHI_PRIVATE_KEY")
+    if pem and not os.environ.get("KALSHI_PRIVATE_KEY_PATH"):
+        try:
+            import tempfile
+            path = Path(tempfile.gettempdir()) / "kalshi_private_key.pem"
+            path.write_text(str(pem))
+            path.chmod(0o600)
+            os.environ["KALSHI_PRIVATE_KEY_PATH"] = str(path)
+            found["KALSHI_PRIVATE_KEY_PATH"] = str(path)
+        except OSError:
+            pass
+    return found
+
+
 load_dotenv()
+load_streamlit_secrets()
 
 
 def _path_env(name: str, default: Path) -> Path:
@@ -87,5 +132,11 @@ def get_config(refresh: bool = False) -> Config:
     global CONFIG
     if refresh:
         load_dotenv(override=True)
+        load_streamlit_secrets()
         CONFIG = Config.load()
+        try:
+            from cfb.data.teams import load_aliases
+            load_aliases.cache_clear()   # keyed on the data dir, which may have moved
+        except ImportError:
+            pass
     return CONFIG

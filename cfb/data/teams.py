@@ -19,7 +19,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-from cfb.config import CONFIG
+from cfb.config import get_config
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def normalize(name: str | None) -> str:
 @lru_cache(maxsize=1)
 def load_aliases() -> dict[str, str]:
     aliases = dict(BUILTIN_ALIASES)
-    path = CONFIG.data_dir / "aliases.json"
+    path = get_config().data_dir / "aliases.json"
     if path.exists():
         try:
             user = json.loads(path.read_text())
@@ -104,7 +104,7 @@ def load_aliases() -> dict[str, str]:
 
 def save_alias(source_name: str, canonical: str) -> Path:
     """Persist a learned mapping so the next run does not have to guess."""
-    path = CONFIG.data_dir / "aliases.json"
+    path = get_config().data_dir / "aliases.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {}
     if path.exists():

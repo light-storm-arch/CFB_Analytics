@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from cfb.config import CONFIG, Config
+from cfb.config import Config, get_config
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class Store:
     """Thin parquet warehouse under ``<data_dir>/processed``."""
 
     def __init__(self, cfg: Config | None = None, subdir: str = "processed"):
-        self.cfg = cfg or CONFIG
+        self.cfg = cfg or get_config()
         self.root: Path = self.cfg.data_dir / subdir
         self.root.mkdir(parents=True, exist_ok=True)
 
@@ -71,6 +71,29 @@ class Store:
             merged = merged.sort_values(sort_cols, kind="stable").reset_index(drop=True)
         self.write(table, merged)
         return merged
+
+    def drop(self, table: str) -> bool:
+        """Delete one table. Returns True if a file was removed."""
+        p = self.path(table)
+        if p.exists():
+            p.unlink()
+            log.info("dropped table %s", table)
+            return True
+        return False
+
+    def clear(self, keep: list[str] | None = None) -> list[str]:
+        """Delete every table except ``keep``. Returns what was dropped.
+
+        Used when switching between the synthetic league and real data: the two
+        must never share a store, because ``upsert`` would concatenate them and
+        the opponent-adjusted ratings would then be fit over a universe that is
+        part real teams and part invented ones.
+        """
+        keep = set(keep or [])
+        dropped = [t for t in self.tables() if t not in keep]
+        for t in dropped:
+            self.drop(t)
+        return dropped
 
     def tables(self) -> list[str]:
         return sorted(p.stem for p in self.root.glob("*.parquet"))

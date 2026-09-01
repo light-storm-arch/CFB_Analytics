@@ -20,7 +20,7 @@ import click
 import numpy as np
 import pandas as pd
 
-from cfb.config import CONFIG, get_config
+from cfb.config import get_config
 from cfb.data.store import Store
 
 pd.set_option("display.width", 200)
@@ -431,7 +431,7 @@ def live_cmd(name, date, all_games, trained, live_model):
 
     tm = None
     if trained:
-        path = CONFIG.artifacts_dir / live_model
+        path = get_config().artifacts_dir / live_model
         if path.exists():
             tm = LiveWinProbModel.load(path)
         else:
@@ -485,7 +485,7 @@ def live_train(name, out):
 
     click.echo(f"training on {len(states)} play-by-play states ...")
     model = LiveWinProbModel(key_numbers=key_numbers).fit(states)
-    path = CONFIG.artifacts_dir / out
+    path = get_config().artifacts_dir / out
     model.save(path)
     click.echo(f"saved -> {path}")
     click.echo(f"validation: {model.report}")

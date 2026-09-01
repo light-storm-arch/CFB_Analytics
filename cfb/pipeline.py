@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cfb.config import CONFIG
+from cfb.config import get_config
 from cfb.data.store import Store
 from cfb.distribution.margin import KeyNumberProfile, MarginDistribution
 from cfb.distribution.sigma import SigmaModel
@@ -250,4 +250,4 @@ def load_features(store: Store | None = None, cfg: FeatureConfig | None = None,
 
 
 def artifacts_dir(name: str = "default") -> Path:
-    return CONFIG.artifacts_dir / name
+    return get_config().artifacts_dir / name

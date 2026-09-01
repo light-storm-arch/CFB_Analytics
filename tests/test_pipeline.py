@@ -114,3 +114,70 @@ def test_crps_rewards_a_sharper_correct_distribution(key_numbers):
     assert crps_discrete(sharp, 7) < crps_discrete(vague, 7)
     wrong = MarginDistribution.from_continuous(-20.0, 10.0, key_numbers=key_numbers)
     assert crps_discrete(wrong, 7) > crps_discrete(sharp, 7)
+
+
+def test_synthetic_and_real_data_never_share_a_store(monkeypatch, tmp_path):
+    """Mixing the two would fit ratings over a part-invented league."""
+    import pandas as pd
+
+    from cfb import bootstrap
+    from cfb.config import get_config
+    from cfb.data.store import Store
+
+    monkeypatch.setenv("CFB_DATA_DIR", str(tmp_path / "data"))
+    get_config(refresh=True)
+    try:
+        bootstrap.build_sample_data(n_teams=40, n_seasons=3, with_pbp=False)
+        status = bootstrap.data_status()
+        assert status.is_synthetic and status.has_data
+
+        # A real fetch must clear the synthetic store first. Stub the network
+        # call and assert it is handed an already-empty store.
+        seen = {}
+
+        def fake_fetch(years, store=None, **kwargs):
+            seen["rows"] = len(store.read("games"))
+            store.write("games", pd.DataFrame({
+                "game_id": [1], "season": [2024], "week": [1],
+                "start_date": pd.to_datetime(["2024-08-31"], utc=True),
+                "home_team": ["Real A"], "away_team": ["Real B"],
+                "home_points": [21.0], "away_points": [14.0],
+                "neutral_site": [False], "conference_game": [True],
+                "completed": [True], "margin": [7.0], "total": [35.0],
+            }))
+            return {"games": 1}
+
+        monkeypatch.setattr("cfb.data.cfbd_client.fetch_seasons", fake_fetch)
+        monkeypatch.setenv("CFBD_API_KEY", "test-key")
+        get_config(refresh=True)
+        bootstrap.fetch_real_data([2024])
+
+        assert seen["rows"] == 0, "synthetic games survived into the real fetch"
+        after = bootstrap.data_status()
+        assert not after.is_synthetic
+        assert set(Store().read("games")["home_team"]) == {"Real A"}
+    finally:
+        monkeypatch.undo()
+        get_config(refresh=True)
+
+
+def test_adaptive_floor_keeps_short_histories_trainable(monkeypatch, tmp_path):
+    """A two-season store must still train, rather than silently yielding
+    nothing because every walk-forward block failed the 800-game floor."""
+    from cfb import bootstrap
+    from cfb.config import get_config
+
+    monkeypatch.setenv("CFB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("CFB_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    get_config(refresh=True)
+    try:
+        bootstrap.build_sample_data(n_teams=40, n_seasons=4, with_pbp=False)
+        predictor, oos = bootstrap.train_model(model_name="ridge", name="short")
+        assert not oos.empty
+        assert predictor.cfg.min_train_games < bootstrap.PREFERRED_MIN_TRAIN_GAMES
+        # A full-size store must go back to the honest threshold.
+        assert bootstrap.adaptive_min_train_games(6000) == \
+            bootstrap.PREFERRED_MIN_TRAIN_GAMES
+    finally:
+        monkeypatch.undo()
+        get_config(refresh=True)

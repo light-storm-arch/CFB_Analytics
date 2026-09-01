@@ -1,0 +1,112 @@
+name: Refresh data
+
+# This workflow is your terminal.
+#
+# It runs `cfb fetch` on GitHub's machines using the CFBD_API_KEY repository
+# secret, then commits the refreshed parquet store back to the repo. The
+# Streamlit app reads that store on boot, which is what makes the hosted app
+# work on a cold start -- Streamlit Cloud wipes its filesystem on every restart.
+#
+# Run it by hand: Actions -> Refresh data -> Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Seasons to fetch, e.g. "2016-2025" or "2023,2025"'
+        required: true
+        default: '2016-2025'
+      plays:
+        description: 'Also fetch play-by-play (slow, and NOT committed)'
+        type: boolean
+        default: false
+      replace:
+        description: 'Wipe the existing store first (use when switching from sample data)'
+        type: boolean
+        default: false
+  schedule:
+    # Tuesdays and Sundays at 09:00 UTC during the season: after the weekend's
+    # results land, and again midweek once lines are up.
+    - cron: '0 9 * * 0,2'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Check for the API key
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+        run: |
+          if [ -z "$CFBD_API_KEY" ]; then
+            echo "::error::CFBD_API_KEY is not set. Add it under"
+            echo "::error::Settings -> Secrets and variables -> Actions -> New repository secret."
+            echo "::error::Get a free key at https://collegefootballdata.com/key"
+            exit 1
+          fi
+
+      - name: Wipe existing store
+        if: ${{ inputs.replace }}
+        run: rm -rf data/processed
+
+      - name: Fetch seasons
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+          SEASONS: ${{ inputs.seasons || '2016-2025' }}
+        run: |
+          python -m cfb.cli -v fetch --seasons "$SEASONS" \
+            ${{ inputs.plays && '--plays' || '--no-plays' }}
+          python -m cfb.cli store
+
+      - name: Sanity-check what was fetched
+        run: |
+          python - <<'PY'
+          import sys
+          from cfb.bootstrap import data_status
+          s = data_status()
+          print(f"status: {s.label}; completed={s.n_completed}; upcoming={s.upcoming_games}")
+          if not s.has_data:
+              sys.exit("no games in the store after fetching")
+          if s.is_synthetic:
+              sys.exit("store still holds synthetic data -- re-run with 'replace' ticked")
+          if s.n_completed < 500:
+              sys.exit(f"only {s.n_completed} completed games; fetch more seasons")
+          PY
+
+      - name: Commit the refreshed store
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # .gitignore already limits this to the small parquet tables; play-by-play
+          # and the raw response cache are excluded.
+          git add -A data/processed
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+            exit 0
+          fi
+          git commit -m "Refresh CFB data store [skip ci]"
+          for i in 1 2 3 4; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push && exit 0
+            sleep $((2 ** i))
+          done
+          echo "::error::Could not push the refreshed data after 4 attempts."
+          exit 1

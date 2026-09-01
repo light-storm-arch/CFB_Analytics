@@ -1,0 +1,7 @@
+# Kept minimal on purpose: pinning a full palette here would override the
+# viewer's light/dark preference, and Streamlit Cloud respects it by default.
+[theme]
+primaryColor = "#2b7bba"
+
+[browser]
+gatherUsageStats = false

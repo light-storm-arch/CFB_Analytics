@@ -15,7 +15,7 @@ from typing import Any
 
 import pandas as pd
 
-from cfb.config import CONFIG, Config
+from cfb.config import Config, get_config
 from cfb.constants import GAME_SECONDS, QUARTER_SECONDS
 from cfb.data.http import JsonClient
 
@@ -95,7 +95,7 @@ def seconds_remaining_in_regulation(period: int, clock_seconds: int) -> int:
 
 class ESPNClient:
     def __init__(self, cfg: Config | None = None, cache_ttl: float | None = 0.0):
-        self.cfg = cfg or CONFIG
+        self.cfg = cfg or get_config()
         # cache_ttl=0 => always refetch (live data); pass a number to cache.
         self.cache_ttl = cache_ttl
         self.http = JsonClient(

@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import pandas as pd
 
-from cfb.config import CONFIG, Config
+from cfb.config import Config, get_config
 from cfb.data.http import JsonClient
 from cfb.data.store import Store
 
@@ -55,7 +55,7 @@ class CFBDClient:
 
     def __init__(self, cfg: Config | None = None, cache_ttl: float | None = None,
                  min_interval: float = 0.35):
-        self.cfg = cfg or CONFIG
+        self.cfg = cfg or get_config()
         if not self.cfg.cfbd_api_key:
             raise RuntimeError(
                 "CFBD_API_KEY is not set. Get a free key at "
@@ -335,11 +335,21 @@ def fetch_seasons(
     client: CFBDClient | None = None,
     include_plays: bool = False,
     play_weeks: Iterable[int] | None = None,
+    progress: Callable[[float, str], None] | None = None,
 ) -> dict[str, int]:
-    """Pull every season-level table for ``years`` and upsert into the store."""
+    """Pull every season-level table for ``years`` and upsert into the store.
+
+    ``progress`` is called as ``progress(fraction_done, message)`` so a UI with
+    no console can show what is happening during a multi-minute pull.
+    """
     store = store or Store()
     client = client or CFBDClient()
     counts: dict[str, int] = {}
+    total = max(len(years), 1)
+
+    def _report(i: int, msg: str):
+        if progress:
+            progress(min(i / total, 1.0), msg)
 
     def _add(table: str, df: pd.DataFrame):
         if df is not None and not df.empty:
@@ -347,10 +357,12 @@ def fetch_seasons(
             counts[table] = counts.get(table, 0) + len(df)
             log.info("%-16s +%d rows", table, len(df))
 
-    for yr in years:
+    for i, yr in enumerate(years):
         log.info("=== season %d ===", yr)
+        _report(i, f"season {yr}: games and lines")
         _add("games", client.games(yr))
         _add("lines", client.lines(yr))
+        _report(i, f"season {yr}: ratings, talent, box scores")
         for name, fn in (
             ("sp_ratings", client.sp_ratings),
             ("talent", client.talent),
@@ -363,5 +375,7 @@ def fetch_seasons(
             except Exception as exc:  # noqa: BLE001
                 log.warning("%s %s failed: %s", name, yr, exc)
         if include_plays:
+            _report(i, f"season {yr}: play-by-play (slow)")
             _add("plays", client.plays_season(yr, weeks=play_weeks))
+        _report(i + 1, f"season {yr}: done")
     return counts
