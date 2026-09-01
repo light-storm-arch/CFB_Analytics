@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all]"
+          pip install ruff
+
+      - name: Lint
+        run: ruff check cfb tests --select F,E9
+
+      - name: Test
+        # The suite redirects the data directory to a temp dir, so it never
+        # touches the committed store and runs identically on a clean runner.
+        run: pytest -q --maxfail=3
+
+      - name: Verify the Streamlit entry point imports
+        run: python -c "import streamlit_app"
