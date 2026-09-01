@@ -194,7 +194,7 @@ def train_model(
     model_name: str = "ridge",
     members: tuple[str, ...] = ("ridge", "xgboost", "forest"),
     include_market: bool = False,
-    include_roster: bool = False,
+    roster_features: str = "none",
     use_roster_prior: bool = False,
     dist_method: str = "lattice",
     refit: str = "season",
@@ -206,7 +206,7 @@ def train_model(
     """Build features, walk-forward train, fit the distribution layer, save."""
     progress = progress or _noop
     fcfg = FeatureConfig(include_market=include_market,
-                         include_roster=include_roster,
+                         roster_features=roster_features,
                          use_roster_prior=use_roster_prior)
     progress(0.05, "building features (walk-forward ratings) ...")
     feats = load_features(cfg=fcfg)
@@ -257,10 +257,12 @@ def roster_ablation(models: tuple[str, ...] = ("ridge",),
               returning=store.read("returning"), sp_ratings=store.read("sp_ratings"),
               portal=store.read("portal"), player_ppa=store.read("player_ppa"))
     variants = {
-        "baseline": FeatureConfig(include_roster=False, use_roster_prior=False),
-        "roster features": FeatureConfig(include_roster=True, use_roster_prior=False),
-        "roster prior": FeatureConfig(include_roster=False, use_roster_prior=True),
-        "both": FeatureConfig(include_roster=True, use_roster_prior=True),
+        "baseline": FeatureConfig(roster_features="none", use_roster_prior=False),
+        "roster trim": FeatureConfig(roster_features="trim", use_roster_prior=False),
+        "roster trim+x": FeatureConfig(roster_features="trim_x", use_roster_prior=False),
+        "roster full": FeatureConfig(roster_features="full", use_roster_prior=False),
+        "roster prior": FeatureConfig(roster_features="none", use_roster_prior=True),
+        "trim + prior": FeatureConfig(roster_features="trim", use_roster_prior=True),
     }
     rows, step, total = [], 0, len(models) * len(variants)
     for model in models:

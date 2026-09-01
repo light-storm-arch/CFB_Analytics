@@ -184,18 +184,28 @@ available here:
 
 Roster-continuity features (portal flux, returning production by phase, QB
 continuity) and a roster-aware preseason ratings prior are both built, tested
-and leak-free — and both **default to off**, because on the bundled synthetic
-league the feature block measured *worse* (+0.037 MAE, sd 0.022 over four
-seeds) and the prior measured neutral (+0.010, sd 0.013).
+and leak-free. Both **default to off**, and the measurements are more
+interesting than a simple yes/no:
 
-The prior does improve the ratings themselves (18% better at predicting next
-season than reusing last season's number), but the downstream model reaches the
-same information by other routes. And even with *perfect* roster knowledge the
-ceiling over plain shrinkage was 2.2%.
+| variant | ridge | xgboost |
+|---|---|---|
+| roster features, trimmed to 3 columns | +0.005 | −0.007 |
+| all 30 columns | +0.037 (worse) | **−0.029 (better, 4/4 seeds)** |
+| roster-aware prior | +0.010 | — |
 
-That verdict is from synthetic data whose roster effects are an invention, so it
+The full block genuinely helps gradient boosting and genuinely hurts ridge:
+trees can form interactions among the raw columns that a linear model cannot.
+But in absolute terms plain ridge (12.06 MAE) beats every xgboost configuration
+(12.47 at best), so the roster work makes the weaker model less weak rather than
+producing a better model.
+
+The prior improves the ratings themselves — 18% better at predicting next season
+than reusing last season's number — but the downstream model reaches the same
+information by other routes.
+
+All of that is from synthetic data whose roster effects are an invention, so it
 cannot be the final word. Once you have real portal data, `cfb ablate` runs the
-exact four-way comparison. Details and numbers: [docs/MODELING.md](docs/MODELING.md) §8b.
+comparison. Details: [docs/MODELING.md](docs/MODELING.md) §8b.
 
 ## Reading the results honestly
 

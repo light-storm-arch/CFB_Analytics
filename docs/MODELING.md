@@ -330,20 +330,57 @@ you is "regress this team harder", and calibrated shrinkage already regresses
 everyone.** The incremental information is *which* teams to regress more or
 less, which is worth much less than the shrinkage itself.
 
-**End-to-end model accuracy**, four synthetic seeds, walk-forward ridge:
+**End-to-end model accuracy**, four synthetic seeds, walk-forward. Difference
+in MAE against that model's own baseline; negative is better:
 
-| variant | Δ MAE vs baseline | sd |
+| variant | columns | ridge | xgboost |
+|---|---|---|---|
+| `trim` | +3 | +0.005 (sd 0.004) | −0.007 (sd 0.025) |
+| `trim_x` | +7 | +0.006 (sd 0.015) | +0.011 (sd 0.033) |
+| `full` | +30 | **+0.037** (sd 0.022) | **−0.029** (sd 0.010) |
+| `trim` + prior | +3 | +0.016 (sd 0.012) | +0.054 (sd 0.062) |
+
+Three things fall out of this, and the second one is not what the first pass
+concluded.
+
+**The trim diagnosis was right for linear models.** Cutting thirty columns to
+three took ridge's damage from +0.037 to +0.005 — so the problem really was
+low-signal columns buying variance. But trim does not *beat* baseline either
+(0 of 4 seeds better), so it fixes the harm without adding value.
+
+**The full block genuinely helps gradient boosting.** −0.029 MAE, better in
+4 of 4 seeds, about six standard errors. An earlier version of this section
+called the block "consistently worse" on the strength of a ridge-only sweep;
+that was an over-generalisation. The effect is real and model-dependent: trees
+can form interactions among the raw home/away levels that a linear model cannot,
+and `trim` — being three *differences* — removes exactly the raw material trees
+were using. That also suggests why trim helps ridge but not xgboost.
+
+**The interaction hypothesis failed.** `trim_x` forms `rat_net × returning_off`
+and `rat_net × qb_continuity` explicitly, on the reasoning that roster facts act
+*through* the prior rating. Those columns correlate with margin at +0.35, about
+as high as `rat_margin` itself — and add nothing (+0.006 / +0.011). This is the
+textbook trap: a product of a strong predictor and a weak one inherits the
+strong one's correlation, and `rat_net_diff` was already in the model.
+
+### But it does not change the recommendation
+
+In absolute terms, across all four seeds:
+
+| | ridge | xgboost |
 |---|---|---|
-| roster features | **+0.037** (worse) | 0.022 |
-| roster prior | +0.010 (neutral) | 0.013 |
-| both | **+0.050** (worse) | 0.032 |
+| baseline | **12.057** | 12.501 |
+| best roster variant | 12.063 (`trim`) | 12.472 (`full`) |
 
-The feature block is consistently worse across all four seeds: thirty
-low-signal columns buy variance, not accuracy. The prior improves the *ratings*
-themselves by ~0.11 MAE but is neutral downstream, because the model reaches the
-same information through Elo, form, talent and prior-season SP+.
+Every ridge configuration beats every xgboost configuration by roughly 0.4 MAE.
+The roster block makes the weaker model less weak; it does not produce a
+configuration better than plain ridge, and none of these move the needle against
+the market baseline. A 0.029 gain on a 12.5 MAE base is 0.2%.
 
 ### Why they ship anyway, and off
+
+Defaults stay off because the best measured configuration is plain ridge with
+no roster features, and ridge is what the app trains by default.
 
 The synthetic league cannot settle this. Its roster effects are an invention of
 the generator, and the 2.2% oracle ceiling is a property of that invention, not
@@ -355,10 +392,13 @@ So the machinery is built, tested and leak-free, and defaults to off. Run
 and player-PPA data; it runs exactly the four-way comparison above. Turn the
 options on if and only if that comes back negative.
 
-If you want to try reviving option 1, the most promising trim is to keep only
-`qb_continuity_diff`, `portal_net_rating_diff` and `returning_off_diff` rather
-than all thirty columns — most of the added variance is columns carrying almost
-no signal.
+Three modes are available via `roster_features`: `trim` (three columns),
+`trim_x` (plus interactions) and `full` (all thirty). On real data the ordering
+above may not hold — in particular, if real quarterback effects are larger than
+this generator models, the columns that carry nothing here may carry something
+there. One hypothesis worth testing that was *not* run: a "levels" trim, the
+three stems as home/away/diff (nine columns), which would keep the raw material
+trees appear to use while dropping the twenty-one that ridge chokes on.
 
 ---
 

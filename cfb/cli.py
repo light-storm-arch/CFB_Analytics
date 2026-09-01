@@ -291,10 +291,12 @@ def ablate(models, seeds):
                    "(`cfb fetch`), or the roster options have nothing to work with.\n")
 
     variants = {
-        "baseline": FeatureConfig(include_roster=False, use_roster_prior=False),
-        "roster features": FeatureConfig(include_roster=True, use_roster_prior=False),
-        "roster prior": FeatureConfig(include_roster=False, use_roster_prior=True),
-        "both": FeatureConfig(include_roster=True, use_roster_prior=True),
+        "baseline": FeatureConfig(roster_features="none", use_roster_prior=False),
+        "roster trim": FeatureConfig(roster_features="trim", use_roster_prior=False),
+        "roster trim+x": FeatureConfig(roster_features="trim_x", use_roster_prior=False),
+        "roster full": FeatureConfig(roster_features="full", use_roster_prior=False),
+        "roster prior": FeatureConfig(roster_features="none", use_roster_prior=True),
+        "trim + prior": FeatureConfig(roster_features="trim", use_roster_prior=True),
     }
     rows = []
     for model in [m.strip() for m in models.split(",") if m.strip()]:
